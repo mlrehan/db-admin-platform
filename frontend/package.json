@@ -1,0 +1,11 @@
+{
+  "name": "db-admin-platform-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Frontend for the DB Admin Platform — vanilla ES6 modules + Web Components (no framework).",
+  "scripts": {
+    "test": "node --test \"tests/*.test.js\"",
+    "check": "node --check main.js"
+  }
+}

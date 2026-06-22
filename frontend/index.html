@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Apply the saved theme before first paint to avoid a flash of the wrong theme. -->
+    <script>
+      try {
+        document.documentElement.dataset.theme =
+          localStorage.getItem("dbadmin.theme") || "dark";
+      } catch (e) {}
+    </script>
+    <title>DB Admin Platform</title>
+    <link rel="shortcut icon" href="./assets/favicon.ico" />   
+
+
+    <meta name="description" content="Enterprise multi-database administration platform" />
+    <link rel="stylesheet" href="./styles/tokens.css" />
+    <link rel="stylesheet" href="./styles/base.css" />
+    <link rel="stylesheet" href="./styles/app.css" />
+    <link rel="stylesheet" href="./styles/modules.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <!-- Runtime config (classic script runs before the deferred module). -->
+    <script src="./config.js"></script>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

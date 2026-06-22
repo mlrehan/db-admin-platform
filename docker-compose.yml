@@ -1,0 +1,77 @@
+# Enterprise DB Admin Platform — full stack.
+#   docker compose up --build
+#
+# Services:
+#   postgres  — control-plane database (platform's own state; NOT a target database)
+#   backend   — FastAPI app; runs migrations + admin bootstrap on start
+#   frontend  — nginx serving the SPA and proxying /api + /ws to the backend
+#
+# Copy .env.example to .env and set the secrets before starting.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CONTROL_DB_USER:-dbadmin}
+      POSTGRES_PASSWORD: ${CONTROL_DB_PASSWORD:?set CONTROL_DB_PASSWORD in .env}
+      POSTGRES_DB: ${CONTROL_DB_NAME:-db_admin_platform}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CONTROL_DB_USER:-dbadmin} -d ${CONTROL_DB_NAME:-db_admin_platform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [internal]
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENVIRONMENT: production
+      CONTROL_DB_HOST: postgres
+      CONTROL_DB_PORT: "5432"
+      CONTROL_DB_USER: ${CONTROL_DB_USER:-dbadmin}
+      CONTROL_DB_PASSWORD: ${CONTROL_DB_PASSWORD}
+      CONTROL_DB_NAME: ${CONTROL_DB_NAME:-db_admin_platform}
+      SECURITY_JWT_SECRET: ${SECURITY_JWT_SECRET:?set SECURITY_JWT_SECRET in .env}
+      SECURITY_MASTER_ENCRYPTION_KEY: ${SECURITY_MASTER_ENCRYPTION_KEY:?set SECURITY_MASTER_ENCRYPTION_KEY in .env}
+      API_CORS_ORIGINS: ${API_CORS_ORIGINS:-http://localhost:8080}
+      LOG_FORMAT: json
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    # Lets connections target databases running on the DOCKER HOST itself: use
+    # host "host.docker.internal" (NOT "localhost" — that's the container). On Linux this
+    # mapping is what makes host.docker.internal resolve to the host gateway.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health/live').status==200 else sys.exit(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    networks: [internal]
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    networks: [internal]
+
+volumes:
+  pgdata:
+
+networks:
+  internal:
+    driver: bridge

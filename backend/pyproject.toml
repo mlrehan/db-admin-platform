@@ -1,0 +1,69 @@
+[project]
+name = "db-admin-platform-backend"
+version = "0.1.0"
+description = "Enterprise multi-database administration platform — backend"
+requires-python = ">=3.12"
+dependencies = [
+    # Web framework / server
+    "fastapi>=0.115,<0.116",
+    "uvicorn[standard]>=0.32,<0.35",
+    "python-multipart>=0.0.12",
+
+    # Config / validation
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.5,<3",
+    "email-validator>=2.2",
+
+    # Control-plane database (PostgreSQL, async)
+    "sqlalchemy[asyncio]>=2.0.35,<2.1",
+    "asyncpg>=0.30,<0.31",
+    "alembic>=1.13,<2",
+    "greenlet>=3.1",
+
+    # Security (used from Phase 2 onward; pinned now so the foundation is reproducible)
+    "argon2-cffi>=23.1",
+    "pyjwt>=2.9,<3",
+    "cryptography>=43.0",
+
+    # SQL parsing for granular (table/operation-level) access control.
+    "sqlglot>=25.0",
+
+    # Target-DB async drivers for the Phase 4 adapter layer.
+    # asyncpg (declared above) powers the PostgreSQL adapter as well as the control plane.
+    "aiomysql>=0.2.0",  # MySQL — pure-Python (PyMySQL), no compiler required
+    "aioodbc>=0.5.0",  # MSSQL — requires an ODBC driver on the host
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "aiosqlite>=0.20",  # in-memory async DB for integration tests
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]

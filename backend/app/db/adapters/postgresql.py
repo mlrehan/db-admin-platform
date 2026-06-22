@@ -1,0 +1,30 @@
+"""PostgreSQL adapter (asyncpg driver)."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.db.adapters._ssl import build_ssl_context
+from app.db.adapters.sqlalchemy_adapter import SQLAlchemyAdapter
+
+
+class PostgreSQLAdapter(SQLAlchemyAdapter):
+    dialect = "postgresql"
+    driver = "asyncpg"
+    server_version_sql = "SELECT version()"
+    # PostgreSQL connections are database-scoped; "postgres" is the maintenance database used
+    # for server-level connections and for enumerating databases.
+    system_database = "postgres"
+    databases_sql = "SELECT datname FROM pg_database WHERE datistemplate = false"
+    hidden_databases = frozenset()
+
+    def _connect_args(self) -> dict[str, Any]:
+        args: dict[str, Any] = {
+            "timeout": self._config.connect_timeout,
+            "server_settings": {"application_name": self.application_name},
+        }
+        ssl_context = build_ssl_context(self._config.ssl_mode)
+        if ssl_context is not None:
+            # asyncpg accepts an SSLContext directly.
+            args["ssl"] = ssl_context
+        return args
