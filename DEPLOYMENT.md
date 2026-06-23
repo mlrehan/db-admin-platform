@@ -124,17 +124,27 @@ On start the backend automatically: waits for PostgreSQL → runs `alembic upgra
 
 ### B5. Verify
 ```bash
-docker compose ps                 # postgres + backend should be "healthy"
-docker compose logs -f backend    # watch migrations + "Application started"
-curl -s http://localhost:8000/health/ready   # {"status":"ok","checks":{"control_plane_db":"ok"}}
+docker compose ps                 # postgres + backend should both say "healthy"
+docker compose logs -f backend    # watch migrations run, then "Application started"
 ```
-Open **http://SERVER_IP:8080** and sign in with the bootstrap admin.
+The backend reports its own readiness through its container healthcheck (that's what makes
+`docker compose ps` show **healthy**). To check it explicitly, run the readiness probe *inside*
+the backend container:
+```bash
+docker compose exec backend python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8000/health/ready').read().decode())"
+# → {"status":"ok","checks":{"control_plane_db":"ok"}}
+```
+Then open **http://SERVER_IP:8080** in your browser and sign in with the bootstrap admin.
 
-| Service | Port | Notes |
+| Service | Published port | Notes |
 |---|---|---|
-| frontend (nginx) | `8080` → 80 | Serves the SPA, proxies `/api` + WebSocket to the backend |
-| backend (uvicorn) | `8000` | Internal/diagnostic; can be unexposed in prod (see B7) |
-| postgres | — | Internal network only (never published) |
+| frontend (nginx) | `8080` → 80 | The **only** port you open. Serves the SPA, proxies `/api` + WebSocket to the backend |
+| backend (uvicorn) | *none* | Internal only — the frontend reaches it over the Docker network. Expose it for debugging via the override file (see B7) |
+| postgres | *none* | Internal network only (never published) |
+
+> **Why can't I reach `http://SERVER_IP:8000`?** That's intentional. The backend is no longer
+> published to the host — only the frontend on `8080` is. This avoids host port conflicts and
+> keeps the API private. Everything goes through the frontend at `:8080`.
 
 ### B5a. Connecting to the databases you want to administer
 
@@ -193,7 +203,12 @@ Point your domain's DNS at the server, then browse **https://db.yourcompany.com*
   ```bash
   sudo ufw allow 22,80,443/tcp && sudo ufw enable
   ```
-- **Don't publish the backend** publicly — in `docker-compose.yml` remove the `backend` `ports:` mapping (the frontend reaches it over the internal Docker network).
+- **The backend is already private** — it is *not* published to the host (the frontend reaches it over the internal Docker network), so there is nothing to remove. If you ever need to hit the API directly from the host for debugging, enable the override instead:
+  ```bash
+  cp docker-compose.override.example.yml docker-compose.override.yml   # publishes the API on :8001
+  docker compose up -d
+  ```
+  Remove that override file again when you're done.
 - **Change the bootstrap admin password** after first login (top‑right key icon → Change password).
 - The audit log is immutable (DB‑level rules); keep it that way.
 
@@ -218,6 +233,38 @@ docker compose down        # stop (keeps the pgdata volume)
 docker compose up -d        # start again
 # docker compose down -v   # DANGER: also deletes the database volume
 ```
+
+### B9. Troubleshooting
+
+**`address already in use` / `failed to bind host port ... :8080`**
+Another process on the host is already using that port. Either stop it, or change the published
+port in `.env` (`FRONTEND_PORT=8090`) and run `docker compose up -d` again.
+> The backend is *not* published to the host, so you should never see this for port `8000`.
+> If you do, it means a `docker-compose.override.yml` is publishing it — see B7.
+
+**Backend stuck "Starting" / unhealthy**
+Watch the logs: `docker compose logs -f backend`.
+- `database not reachable` → PostgreSQL didn't come up. Check `docker compose logs postgres` and
+  that `CONTROL_DB_PASSWORD` in `.env` is set.
+- Migration errors → usually a leftover database volume from an older schema. On a *fresh* deploy
+  with no data you want to keep, reset it: `docker compose down -v && docker compose up -d --build`
+  (**`-v` deletes the database** — never do this if you have real data).
+
+**Can't sign in after first start**
+The bootstrap admin is only created if **both** `BOOTSTRAP_ADMIN_EMAIL` and
+`BOOTSTRAP_ADMIN_PASSWORD` are set in `.env`. If you missed them, set them and restart
+(`docker compose up -d`), or create one manually:
+```bash
+docker compose exec backend python -m app.cli create-admin --email admin@yourcompany.com
+```
+
+**Browser loads but API calls fail (CORS / network errors)**
+`API_CORS_ORIGINS` in `.env` must exactly match the URL you open in the browser
+(e.g. `https://db.yourcompany.com` or `http://SERVER_IP:8080`). Fix it and `docker compose up -d`.
+
+**A target-database connection fails with "connection refused" to a DB on this same server**
+Use `host.docker.internal` as the host, **not** `localhost`, and allow the Docker subnet on the
+DB — see **B5a**.
 
 ### Scaling note
 The backend runs a **single worker** by design — live target‑DB sessions are held in process memory by the Connection Orchestrator. Running multiple backend replicas would split that state; horizontal scaling would first require externalizing session state.

@@ -119,13 +119,18 @@ export class AppRoot extends HTMLElement {
             </div>
           </div>
         </header>
-        <nav class="app-sidebar">${navHtml}</nav>
+        <nav class="app-sidebar" id="app-sidebar-nav">${navHtml}</nav>
+        <div class="nav-scrim" id="nav-scrim" aria-hidden="true"></div>
         <main class="app-main" id="outlet"></main>
       </div>`;
 
     this._outlet = this.querySelector("#outlet");
     const shell = this.querySelector(".app-shell");
-    const closeNav = () => shell.classList.remove("nav-open");
+    const toggle = this.querySelector("#sidebar-toggle");
+    const closeNav = () => {
+      shell.classList.remove("nav-open");
+      toggle.setAttribute("aria-expanded", "false");
+    };
     this.querySelectorAll(".nav-item").forEach((el) => {
       const go = () => {
         app.router.navigate(el.dataset.path);
@@ -137,11 +142,19 @@ export class AppRoot extends HTMLElement {
       });
     });
     // Mobile drawer toggle.
-    this.querySelector("#sidebar-toggle").addEventListener("click", (e) => {
+    toggle.setAttribute("aria-controls", "app-sidebar-nav");
+    toggle.addEventListener("click", (e) => {
       e.stopPropagation();
-      shell.classList.toggle("nav-open");
+      const open = shell.classList.toggle("nav-open");
+      toggle.setAttribute("aria-expanded", String(open));
     });
+    // Tap the dimmed backdrop (or anywhere in the content) to close the drawer.
+    this.querySelector("#nav-scrim").addEventListener("click", closeNav);
     this._outlet.addEventListener("click", closeNav);
+    // Esc closes the drawer.
+    this.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeNav();
+    });
 
     // Topbar quick actions.
     this.querySelector("#help").addEventListener("click", () => openHelp());

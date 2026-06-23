@@ -36,6 +36,15 @@
 .app-topbar .title {
   font-weight: 600;
   letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Topbar action buttons (menu / help / theme) need an explicit icon size — inline SVGs have
+   no intrinsic dimensions, so without this the hamburger can collapse and become invisible. */
+.app-topbar .btn svg {
+  width: 20px;
+  height: 20px;
 }
 
 .app-sidebar {
@@ -346,8 +355,11 @@
   }
 }
 
-/* The mobile drawer toggle is hidden on desktop. */
+/* The mobile drawer toggle and backdrop are hidden on desktop. */
 .sidebar-toggle {
+  display: none;
+}
+.nav-scrim {
   display: none;
 }
 
@@ -368,9 +380,28 @@
   }
   .sidebar-toggle {
     display: inline-flex;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    flex: none;
   }
   .user-meta {
     display: none; /* keep avatar + caret; hide email/role text */
+  }
+  /* Dimmed backdrop behind the off-canvas drawer; tap to close. */
+  .nav-scrim {
+    position: fixed;
+    inset: var(--topbar-h) 0 0 0;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--dur) var(--ease);
+    z-index: 700;
+  }
+  .app-shell.nav-open .nav-scrim {
+    display: block;
+    opacity: 1;
+    pointer-events: auto;
   }
   .app-sidebar {
     position: fixed;

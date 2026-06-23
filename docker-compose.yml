@@ -9,28 +9,80 @@
 # Copy .env.example to .env and set the secrets before starting.
 
 services:
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${CONTROL_DB_USER:-dbadmin}
-      POSTGRES_PASSWORD: ${CONTROL_DB_PASSWORD:?set CONTROL_DB_PASSWORD in .env}
+      POSTGRES_PASSWORD: ${CONTROL_DB_PASSWORD}
       POSTGRES_DB: ${CONTROL_DB_NAME:-db_admin_platform}
     volumes:
       - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${CONTROL_DB_USER:-dbadmin} -d ${CONTROL_DB_NAME:-db_admin_platform}"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-    networks: [internal]
+    networks:
+      - internal
+
+
+  # =========================
+  # MSSQL (CHANGED PORT!)
+  # =========================
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: mssql-db
+    restart: unless-stopped
+
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: "Developer"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-Strong@12345}
+
+    ports:
+      - "15333:1433"
+
+    volumes:
+      - mssql_data:/var/opt/mssql
+      - mssql_backup:/var/opt/mssql/backup
+
+    networks:
+      - internal
+
+
+  # =========================
+  # MYSQL (NEW)
+  # =========================
+  mysql:
+    image: mysql:8.0
+    container_name: mysql-db
+    restart: unless-stopped
+
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-Root@12345}
+      MYSQL_DATABASE: app_db
+      MYSQL_USER: app_user
+      MYSQL_PASSWORD: App@12345
+
+    ports:
+      - "3307:3306"   # 🔥 host port changed
+
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+    networks:
+      - internal
+
 
   backend:
     build: ./backend
     restart: unless-stopped
+
     depends_on:
       postgres:
-        condition: service_healthy
+        condition: service_started
+      mssql:
+        condition: service_started
+      mysql:
+        condition: service_started
+
     environment:
       APP_ENVIRONMENT: production
       CONTROL_DB_HOST: postgres
@@ -45,32 +97,42 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+
+      # MSSQL (IMPORTANT: internal port stays 1433)
+      MSSQL_HOST: mssql
+      MSSQL_PORT: "1433"
+      MSSQL_USER: sa
+      MSSQL_PASSWORD: ${MSSQL_SA_PASSWORD:-Strong@12345}
+
+      # MYSQL
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: app_user
+      MYSQL_PASSWORD: App@12345
+      MYSQL_DATABASE: app_db
+
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
-    # Lets connections target databases running on the DOCKER HOST itself: use
-    # host "host.docker.internal" (NOT "localhost" — that's the container). On Linux this
-    # mapping is what makes host.docker.internal resolve to the host gateway.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health/live').status==200 else sys.exit(1)"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 30s
-    networks: [internal]
+      - "8000:8000"
+
+    networks:
+      - internal
+
 
   frontend:
     build: ./frontend
     restart: unless-stopped
-    depends_on:
-      - backend
     ports:
-      - "${FRONTEND_PORT:-8080}:80"
-    networks: [internal]
+      - "8080:80"
+    networks:
+      - internal
+
 
 volumes:
   pgdata:
+  mssql_data:
+  mssql_backup:
+  mysql_data:
+
 
 networks:
   internal:
