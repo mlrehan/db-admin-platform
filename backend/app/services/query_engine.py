@@ -349,6 +349,46 @@ class QueryEngine:
         finally:
             session.lock.release()
 
+    # --- out-of-band auditing ------------------------------------------------------------
+
+    async def audit_action(
+        self,
+        *,
+        user: User,
+        session: LiveSession,
+        statement: str,
+        category: str = "ddl",
+        destructive: bool = True,
+        success: bool,
+        started: datetime,
+        error_code: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Record an audit event for an action that doesn't go through the query path
+        (e.g. CREATE DATABASE, which runs in autocommit outside the engine)."""
+        finished = QueryAuditEvent.now()
+        event = QueryAuditEvent(
+            user_id=user.id,
+            user_email=getattr(user, "email", None),
+            session_id=session.id,
+            connection_id=session.connection_id,
+            engine=session.adapter.engine,
+            statement=statement,
+            category=category,
+            destructive=destructive,
+            success=success,
+            duration_ms=(finished - started).total_seconds() * 1000,
+            started_at=started,
+            finished_at=finished,
+            error_code=error_code,
+            error_message=(error[:500] if error else None),
+            request_id=get_request_id(),
+        )
+        try:
+            await self._audit.record_query(event)
+        except Exception:  # auditing must never break the action
+            logger.exception("Failed to record audit event")
+
     # --- cancellation --------------------------------------------------------------------
 
     async def cancel(self, query_id: uuid.UUID, *, user_id: uuid.UUID) -> None:

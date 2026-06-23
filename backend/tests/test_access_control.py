@@ -85,3 +85,33 @@ def test_database_allowed_and_table_visible() -> None:
     assert not policy.database_allowed("otherdb")
     assert policy.table_visible("appdb", "public", "users")
     assert not policy.table_visible("appdb", "public", "orders")
+
+
+# --- can_create_database (database creation authorization) -------------------------------
+
+
+def test_admin_can_create_database() -> None:
+    assert _policy(admin=True).can_create_database()
+
+
+def test_no_grants_cannot_create_database() -> None:
+    assert not _policy().can_create_database()
+
+
+def test_connection_scope_create_grant_allows_create_database() -> None:
+    # Broad CREATE on the whole connection (no db/table scope) → may create databases.
+    grant = GrantSpec(frozenset({SqlOperation.CREATE}), None, None, None)
+    assert _policy(grant).can_create_database()
+
+
+def test_narrow_create_grant_does_not_allow_create_database() -> None:
+    # CREATE scoped to a single database/table is NOT server-level create-database rights.
+    scoped_db = GrantSpec(frozenset({SqlOperation.CREATE}), "appdb", None, None)
+    assert not _policy(scoped_db).can_create_database()
+    scoped_table = GrantSpec(frozenset({SqlOperation.CREATE}), None, None, "users")
+    assert not _policy(scoped_table).can_create_database()
+
+
+def test_select_grant_does_not_allow_create_database() -> None:
+    grant = GrantSpec(frozenset({SqlOperation.SELECT}), None, None, None)
+    assert not _policy(grant).can_create_database()

@@ -16,11 +16,14 @@ export class SchemaView extends HTMLElement {
       </div>`;
     this._tree = this.querySelector("#tree");
     this._unsub = sessionStore.subscribe(() => this._loadRoot());
+    // Reload the tree after a DDL run created/changed objects.
+    this._unsubMeta = bus.on(Events.METADATA_CHANGED, () => this._loadRoot());
     if (sessionStore.getState().sessionId) this._loadRoot();
   }
 
   disconnectedCallback() {
     this._unsub?.();
+    this._unsubMeta?.();
   }
 
   _session() {

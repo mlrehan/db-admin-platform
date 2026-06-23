@@ -17,6 +17,9 @@ class PostgreSQLAdapter(SQLAlchemyAdapter):
     system_database = "postgres"
     databases_sql = "SELECT datname FROM pg_database WHERE datistemplate = false"
     hidden_databases = frozenset()
+    # Catalog/metadata schemas non-admins must not see (pg_catalog, pg_toast, pg_temp_*, …).
+    system_schemas = frozenset({"information_schema"})
+    system_schema_prefixes = ("pg_",)
 
     def _connect_args(self) -> dict[str, Any]:
         args: dict[str, Any] = {

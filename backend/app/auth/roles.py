@@ -33,6 +33,7 @@ class Permission(str, Enum):
 
     # Schema / metadata
     SCHEMA_READ = "schema:read"
+    DATABASE_CREATE = "database:create"  # create a new database on a server-level connection
 
     # Query execution
     QUERY_READ = "query:read"  # SELECT / read-only statements

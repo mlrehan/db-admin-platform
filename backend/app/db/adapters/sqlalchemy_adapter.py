@@ -15,6 +15,7 @@ schema introspection are layered on top in Phases 5 and 6.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -25,7 +26,7 @@ from sqlalchemy.engine import Connection as SyncConnection
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
-from app.core.exceptions import ConnectionFailedError
+from app.core.exceptions import ConnectionFailedError, ValidationError
 from app.core.logging import get_logger
 from app.db.adapters.base import (
     ConnectionConfig,
@@ -50,6 +51,11 @@ logger = get_logger(__name__)
 
 _POOL_RECYCLE_SECONDS = 1800
 
+# A conservative database-name policy: starts with a letter/underscore, then letters, digits,
+# underscore, '$' or '-' (max 63 chars). Names are also dialect-quoted before use, so this is
+# defence-in-depth against injection, not the only guard.
+_DB_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$-]{0,62}$")
+
 
 class SQLAlchemyAdapter(DatabaseAdapter):
     # Subclasses must set these.
@@ -64,6 +70,19 @@ class SQLAlchemyAdapter(DatabaseAdapter):
     databases_sql: ClassVar[str] = "SELECT NULL WHERE 1=0"
     # Databases hidden from the user-facing listing (engine system databases).
     hidden_databases: ClassVar[frozenset[str]] = frozenset()
+    # Engine "system" schemas (catalogs/metadata) that non-admins must never see.
+    system_schemas: ClassVar[frozenset[str]] = frozenset()
+    # Name prefixes that identify dynamic system schemas (e.g. PostgreSQL's pg_*).
+    system_schema_prefixes: ClassVar[tuple[str, ...]] = ()
+
+    def is_system_schema(self, name: str | None) -> bool:
+        """Whether ``name`` is an engine-internal schema (hidden from non-admins)."""
+        if not name:
+            return False
+        lowered = name.lower()
+        if lowered in {s.lower() for s in self.system_schemas}:
+            return True
+        return any(lowered.startswith(p.lower()) for p in self.system_schema_prefixes)
 
     def __init__(self, config: ConnectionConfig) -> None:
         super().__init__(config)
@@ -207,6 +226,28 @@ class SQLAlchemyAdapter(DatabaseAdapter):
         ]
         databases.sort(key=lambda d: d.name)
         return databases
+
+    async def create_database(self, name: str) -> str:
+        """Create a new database on the server and return its name.
+
+        Runs in **AUTOCOMMIT** because ``CREATE DATABASE`` cannot execute inside a transaction
+        on PostgreSQL. The name is validated against a strict identifier policy and then quoted
+        with the dialect's identifier preparer (defence-in-depth against SQL injection).
+        """
+        candidate = (name or "").strip()
+        if not _DB_NAME_RE.match(candidate):
+            raise ValidationError(
+                "Invalid database name. Use a letter or underscore followed by letters, "
+                "digits, underscore, '$' or '-' (max 63 characters)."
+            )
+        if not self._connected:
+            await self.connect()
+        engine = self._engine_for(None)
+        quoted = engine.dialect.identifier_preparer.quote(candidate)
+        async with engine.connect() as conn:
+            autocommit = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await autocommit.execute(text(f"CREATE DATABASE {quoted}"))
+        return candidate
 
     async def test_connection(self) -> ConnectionTestResult:
         """Self-contained connectivity check. Never raises — failures return ``ok=False``.

@@ -37,11 +37,28 @@ class FakeAdapter(DatabaseAdapter):
     ``options={"row_count": <n>}`` controls how many synthetic rows are produced.
     """
 
+    # Mirrors the real adapters: a "system" schema non-admins must never see.
+    system_schemas = frozenset({"pg_catalog"})
+    system_schema_prefixes: tuple[str, ...] = ("pg_",)
+
     def __init__(self, config: ConnectionConfig) -> None:
         super().__init__(config)
         self._connected = False
         self.close_calls = 0
         self._active_db = None
+        self.created_databases: list[str] = []
+
+    def is_system_schema(self, name: str | None) -> bool:
+        if not name:
+            return False
+        lowered = name.lower()
+        if lowered in {s.lower() for s in self.system_schemas}:
+            return True
+        return any(lowered.startswith(p) for p in self.system_schema_prefixes)
+
+    async def create_database(self, name: str) -> str:
+        self.created_databases.append(name)
+        return name
 
     @property
     def is_connected(self) -> bool:
@@ -161,7 +178,12 @@ class FakeAdapter(DatabaseAdapter):
     # --- metadata: canned schema --------------------------------------------------------
 
     async def list_schemas(self) -> list[SchemaInfo]:
-        return [SchemaInfo(name="public", is_default=True), SchemaInfo(name="reporting")]
+        # "pg_catalog" is a system schema — the API hides it from non-admins.
+        return [
+            SchemaInfo(name="public", is_default=True),
+            SchemaInfo(name="reporting"),
+            SchemaInfo(name="pg_catalog"),
+        ]
 
     async def list_tables(self, schema: str | None = None) -> list[TableInfo]:
         target = schema or "public"

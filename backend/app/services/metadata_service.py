@@ -26,6 +26,13 @@ class MetadataService:
         session.touch()
         await session.adapter.use_database(database)
 
+    async def create_database(self, session: LiveSession, name: str) -> str:
+        session.touch()
+        create = getattr(session.adapter, "create_database", None)
+        if create is None:  # pragma: no cover - all real adapters support it
+            raise NotImplementedError("This engine does not support creating databases.")
+        return await create(name)
+
     async def list_schemas(self, session: LiveSession) -> list[SchemaInfo]:
         session.touch()
         return await session.adapter.list_schemas()

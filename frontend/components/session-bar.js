@@ -4,6 +4,8 @@
 import { app } from "../core/context.js";
 import { bus, Events } from "../core/events.js";
 import { sessionStore, setActiveSession, setActiveDatabase } from "../core/session-state.js";
+import { clearMetadataCache } from "../core/metadata-cache.js";
+import { promptText } from "../core/notify.js";
 import { escapeHtml } from "./view-helpers.js";
 
 export class SessionBar extends HTMLElement {
@@ -47,6 +49,9 @@ export class SessionBar extends HTMLElement {
       <select class="input db-select" title="Active database" disabled>
         <option value="">—</option>
       </select>
+      <button class="btn btn-ghost newdb-btn" title="Create a new database" ${
+        this._canCreateDb(active) ? "" : "hidden"
+      }>＋ Database</button>
       <span class="sep"></span>
       <select class="input conn-select">
         <option value="">Open from connection…</option>${connOpts}
@@ -59,18 +64,23 @@ export class SessionBar extends HTMLElement {
       if (s) {
         setActiveSession(s);
         this._loadDatabases(s.id);
+        this._toggleNewDbButton(s.id);
       }
     });
     this.querySelector(".db-select").addEventListener("change", (e) =>
       this._switchDatabase(e.target.value)
     );
+    this.querySelector(".newdb-btn").addEventListener("click", () => this._createDatabase());
     this.querySelector(".open-btn").addEventListener("click", () => this._open());
     this.querySelector(".refresh-btn").addEventListener("click", () => this.refresh());
 
     // Auto-select the first session if none active.
     const current = sessionStore.getState().sessionId || (sessions[0] && sessions[0].id);
     if (!active && sessions.length) setActiveSession(sessions[0]);
-    if (current) this._loadDatabases(current);
+    if (current) {
+      this._loadDatabases(current);
+      this._toggleNewDbButton(current);
+    }
   }
 
   async _loadDatabases(sessionId) {
@@ -91,6 +101,42 @@ export class SessionBar extends HTMLElement {
     } catch {
       select.innerHTML = `<option value="">—</option>`;
       select.disabled = true;
+    }
+  }
+
+  _canCreateDb(sessionId) {
+    const s = (this._sessions || []).find((x) => x.id === sessionId);
+    return !!(s && s.can_create_database);
+  }
+
+  _toggleNewDbButton(sessionId) {
+    const btn = this.querySelector(".newdb-btn");
+    if (btn) btn.hidden = !this._canCreateDb(sessionId);
+  }
+
+  async _createDatabase() {
+    const sessionId = sessionStore.getState().sessionId;
+    if (!sessionId) return;
+    const name = await promptText({
+      title: "Create database",
+      text: "Name the new database. It will be created on the connected server.",
+      placeholder: "my_new_database",
+      confirmText: "Create",
+    });
+    if (!name) return;
+    try {
+      const created = await app.api.createDatabase(sessionId, name);
+      clearMetadataCache(); // the database list changed
+      await this._loadDatabases(sessionId);
+      bus.emit(Events.TOAST, {
+        message: `Database "${created.name}" created`,
+        kind: "success",
+      });
+    } catch (err) {
+      bus.emit(Events.TOAST, {
+        message: err?.message || "Could not create database",
+        kind: "error",
+      });
     }
   }
 

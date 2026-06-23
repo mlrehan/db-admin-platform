@@ -5,10 +5,14 @@
 import { app } from "../../core/context.js";
 import { bus, Events } from "../../core/events.js";
 import { sessionStore } from "../../core/session-state.js";
+import { clearMetadataCache } from "../../core/metadata-cache.js";
 import { escapeHtml } from "../../components/view-helpers.js";
 import "../../components/session-bar.js";
 import "../../components/code-editor.js";
 import "../../components/data-grid.js";
+
+// Guard against accidentally loading a huge dump into the in-browser editor.
+const MAX_SQL_FILE_BYTES = 8 * 1024 * 1024; // 8 MB
 
 export class EditorView extends HTMLElement {
   connectedCallback() {
@@ -17,7 +21,9 @@ export class EditorView extends HTMLElement {
         <div class="editor-toolbar">
           <session-bar></session-bar>
           <span class="spacer"></span>
+          <button class="btn btn-ghost" id="open-file" title="Open a .sql or .txt file">📂 Open file</button>
           <button class="btn btn-primary" id="run">▶ Run <span class="muted">⌘⏎</span></button>
+          <input type="file" id="file-input" accept=".sql,.txt,text/plain" hidden />
         </div>
         <code-editor value="SELECT 1;"></code-editor>
         <div class="result-status" id="status"><span class="muted">Ready.</span></div>
@@ -34,12 +40,39 @@ export class EditorView extends HTMLElement {
     this._messages = this.querySelector("#messages");
     this._status = this.querySelector("#status");
     this._runBtn = this.querySelector("#run");
+    this._fileInput = this.querySelector("#file-input");
 
     this._runBtn.addEventListener("click", () => this._run());
     this.addEventListener("run", () => this._run());
+    this.querySelector("#open-file").addEventListener("click", () => this._fileInput.click());
+    this._fileInput.addEventListener("change", (e) => this._openFile(e.target.files[0]));
     this.querySelectorAll(".rtab").forEach((t) =>
       t.addEventListener("click", () => this._selectTab(t.dataset.rtab))
     );
+  }
+
+  async _openFile(file) {
+    if (!file) return;
+    if (file.size > MAX_SQL_FILE_BYTES) {
+      bus.emit(Events.TOAST, {
+        message: `File is too large (max ${MAX_SQL_FILE_BYTES / (1024 * 1024)} MB).`,
+        kind: "error",
+      });
+      this._fileInput.value = "";
+      return;
+    }
+    try {
+      const text = await file.text();
+      this._editor.setValue(text);
+      this._status.innerHTML = `<span class="muted">Loaded <strong>${escapeHtml(
+        file.name
+      )}</strong> — press Run to execute.</span>`;
+    } catch (err) {
+      bus.emit(Events.TOAST, { message: `Could not read file: ${err.message}`, kind: "error" });
+    } finally {
+      // Allow re-selecting the same file again later.
+      this._fileInput.value = "";
+    }
   }
 
   _selectTab(tab) {
@@ -70,6 +103,12 @@ export class EditorView extends HTMLElement {
     try {
       const res = await app.api.executeScript(sessionId, sql);
       this._render(res, Math.round(performance.now() - start));
+      // The script may have created/dropped/altered objects — drop cached metadata so the
+      // Schema Explorer, Data Viewer and database list show the updated structure immediately.
+      if (res.statements?.some((s) => s.success && s.category === "ddl")) {
+        clearMetadataCache();
+        bus.emit(Events.METADATA_CHANGED, { sessionId });
+      }
     } catch (err) {
       this._grid.setBusy(false);
       this._status.innerHTML = `<span style="color:var(--danger)">✕ ${escapeHtml(err.message)}</span>`;

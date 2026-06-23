@@ -22,6 +22,8 @@ class MySQLAdapter(SQLAlchemyAdapter):
     hidden_databases = frozenset(
         {"information_schema", "mysql", "performance_schema", "sys"}
     )
+    # In MySQL a "schema" is a database, so the system schemas mirror the hidden databases.
+    system_schemas = frozenset({"information_schema", "mysql", "performance_schema", "sys"})
 
     def _url_query(self) -> dict[str, str]:
         # Full Unicode (incl. 4-byte) support.

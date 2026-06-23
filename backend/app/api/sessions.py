@@ -29,7 +29,7 @@ router = APIRouter(tags=["sessions"])
 _can_use = Depends(require_permissions(Permission.CONNECTION_USE))
 
 
-def _to_read(session: LiveSession) -> SessionRead:
+def _to_read(session: LiveSession, *, can_create_database: bool = False) -> SessionRead:
     return SessionRead(
         id=session.id,
         connection_id=session.connection_id,
@@ -39,7 +39,13 @@ def _to_read(session: LiveSession) -> SessionRead:
         idle_seconds=round(session.idle_seconds(), 2),
         connected=session.adapter.is_connected,
         active_database=session.adapter.active_database,
+        can_create_database=can_create_database,
     )
+
+
+async def _can_create_db(access: AccessControlService, user: CurrentUser, connection_id) -> bool:
+    policy = await access.policy_for(user, connection_id)
+    return policy.can_create_database()
 
 
 @router.post(
@@ -70,16 +76,24 @@ async def open_session(
     session = await orchestrator.open_session(
         user_id=user.id, connection_id=conn.id, config=config
     )
-    return _to_read(session)
+    return _to_read(session, can_create_database=await _can_create_db(access, user, conn.id))
 
 
 @router.get("", response_model=list[SessionRead], dependencies=[_can_use])
 async def list_sessions(
     user: CurrentUser,
     orchestrator: Annotated[ConnectionOrchestrator, Depends(get_orchestrator)],
+    access: Annotated[AccessControlService, Depends(get_access_service)],
 ) -> list[SessionRead]:
     sessions = await orchestrator.list_sessions(user_id=user.id)
-    return [_to_read(s) for s in sessions]
+    # Cache per-connection capability so N sessions on one connection cost one policy lookup.
+    cache: dict[uuid.UUID, bool] = {}
+    out: list[SessionRead] = []
+    for s in sessions:
+        if s.connection_id not in cache:
+            cache[s.connection_id] = await _can_create_db(access, user, s.connection_id)
+        out.append(_to_read(s, can_create_database=cache[s.connection_id]))
+    return out
 
 
 @router.get("/{session_id}", response_model=SessionRead, dependencies=[_can_use])
@@ -87,9 +101,12 @@ async def get_session_info(
     session_id: uuid.UUID,
     user: CurrentUser,
     orchestrator: Annotated[ConnectionOrchestrator, Depends(get_orchestrator)],
+    access: Annotated[AccessControlService, Depends(get_access_service)],
 ) -> SessionRead:
     session = await orchestrator.get_session(session_id, user_id=user.id)
-    return _to_read(session)
+    return _to_read(
+        session, can_create_database=await _can_create_db(access, user, session.connection_id)
+    )
 
 
 @router.delete(

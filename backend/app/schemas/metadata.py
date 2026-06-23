@@ -15,6 +15,10 @@ class SwitchDatabaseRequest(BaseModel):
     database: str | None = Field(default=None, max_length=255)
 
 
+class CreateDatabaseRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=63)
+
+
 class SchemaOut(BaseModel):
     name: str
     is_default: bool

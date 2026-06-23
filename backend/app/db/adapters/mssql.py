@@ -51,6 +51,23 @@ class MSSQLAdapter(SQLAlchemyAdapter):
     system_database = "master"
     databases_sql = "SELECT name FROM sys.databases"
     hidden_databases = frozenset({"master", "tempdb", "model", "msdb"})
+    # SQL Server system schemas + the fixed database-role schemas (no user objects).
+    system_schemas = frozenset(
+        {
+            "sys",
+            "information_schema",
+            "guest",
+            "db_owner",
+            "db_accessadmin",
+            "db_securityadmin",
+            "db_ddladmin",
+            "db_backupoperator",
+            "db_datareader",
+            "db_datawriter",
+            "db_denydatareader",
+            "db_denydatawriter",
+        }
+    )
 
     def _url_query(self) -> dict[str, str]:
         mode = self._config.ssl_mode

@@ -23,3 +23,5 @@ class SessionRead(BaseModel):
     idle_seconds: float
     connected: bool
     active_database: str | None = None
+    # Whether the current user may create a database on this connection (admin or granted).
+    can_create_database: bool = False

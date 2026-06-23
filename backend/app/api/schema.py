@@ -10,13 +10,20 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 
-from app.api.deps import get_access_service, get_metadata_service, get_orchestrator
-from app.auth.dependencies import CurrentUser, require_permissions
+from app.api.deps import (
+    get_access_service,
+    get_metadata_service,
+    get_orchestrator,
+    get_query_engine,
+)
+from app.auth.dependencies import CurrentUser, has_permission, require_permissions
 from app.auth.roles import Permission
 from app.core.exceptions import AuthorizationError, NotFoundError
 from app.services.access_control import AccessControlService
+from app.services.audit_sink import QueryAuditEvent
+from app.services.query_engine import QueryEngine
 from app.db.adapters.metadata import (
     DatabaseInfo,
     RoutineInfo,
@@ -26,6 +33,7 @@ from app.db.adapters.metadata import (
 )
 from app.schemas.metadata import (
     ColumnOut,
+    CreateDatabaseRequest,
     DatabaseOut,
     ForeignKeyOut,
     IndexOut,
@@ -123,6 +131,50 @@ async def switch_database(
     return DatabaseOut(name=session.adapter.active_database or "", is_active=True)
 
 
+@router.post(
+    "/sessions/{session_id}/databases",
+    response_model=DatabaseOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[_can_read],
+)
+async def create_database(
+    session_id: uuid.UUID,
+    payload: CreateDatabaseRequest,
+    user: CurrentUser,
+    orchestrator: Annotated[ConnectionOrchestrator, Depends(get_orchestrator)],
+    metadata: Annotated[MetadataService, Depends(get_metadata_service)],
+    access: Annotated[AccessControlService, Depends(get_access_service)],
+    engine: Annotated[QueryEngine, Depends(get_query_engine)],
+) -> DatabaseOut:
+    """Create a new database on the connection's server.
+
+    Admins always may; a non-admin may only when an admin granted them broad CREATE rights on
+    the connection (default-deny). The action is audited like any other DDL.
+    """
+    session = await _resolve_session(orchestrator, session_id, user.id)
+    policy = await access.policy_for(user, session.connection_id)
+    if not policy.can_create_database():
+        raise AuthorizationError(
+            "You have not been granted permission to create databases on this connection.",
+            code="ACCESS_DENIED",
+        )
+    started = QueryAuditEvent.now()
+    try:
+        created = await metadata.create_database(session, payload.name)
+    except Exception as exc:
+        await engine.audit_action(
+            user=user, session=session, statement=f"CREATE DATABASE {payload.name}",
+            success=False, started=started, error=str(exc),
+            error_code=getattr(exc, "code", "DATABASE_CREATE_FAILED"),
+        )
+        raise
+    await engine.audit_action(
+        user=user, session=session, statement=f"CREATE DATABASE {created}",
+        success=True, started=started,
+    )
+    return DatabaseOut(name=created, is_active=False)
+
+
 @router.get(
     "/sessions/{session_id}/schemas",
     response_model=list[SchemaOut],
@@ -136,7 +188,15 @@ async def list_schemas(
 ) -> list[SchemaOut]:
     session = await _resolve_session(orchestrator, session_id, user.id)
     schemas: list[SchemaInfo] = await metadata.list_schemas(session)
-    return [SchemaOut(name=s.name, is_default=s.is_default) for s in schemas]
+    # Non-admins never see engine-internal/system schemas (pg_catalog, sys, information_schema,
+    # mysql, …). Admins keep full visibility so they can administer everything.
+    is_admin = has_permission(user, Permission.USER_MANAGE)
+    is_system = getattr(session.adapter, "is_system_schema", lambda _n: False)
+    return [
+        SchemaOut(name=s.name, is_default=s.is_default)
+        for s in schemas
+        if is_admin or not is_system(s.name)
+    ]
 
 
 @router.get(

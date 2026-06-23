@@ -35,4 +35,6 @@ export const Events = Object.freeze({
   AUTH_CHANGED: "auth:changed",
   UNAUTHORIZED: "auth:unauthorized",
   TOAST: "ui:toast",
+  // Emitted after DDL runs so metadata views (Schema Explorer, etc.) reload.
+  METADATA_CHANGED: "metadata:changed",
 });

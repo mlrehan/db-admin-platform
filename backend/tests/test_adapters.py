@@ -160,3 +160,44 @@ def test_postgres_connect_args_include_ssl_when_required() -> None:
 def test_redact_strips_password() -> None:
     adapter = PostgreSQLAdapter(_config(EngineType.POSTGRESQL, password="topsecret"))
     assert adapter._redact("error near topsecret here") == "error near *** here"  # noqa: SLF001
+
+
+# --- system-schema detection (non-admins must never see these) ---------------------------
+
+
+def test_postgres_system_schema_detection() -> None:
+    pg = PostgreSQLAdapter(_config(EngineType.POSTGRESQL))
+    assert pg.is_system_schema("pg_catalog")
+    assert pg.is_system_schema("pg_toast")
+    assert pg.is_system_schema("information_schema")
+    assert not pg.is_system_schema("public")
+    assert not pg.is_system_schema("reporting")
+    assert not pg.is_system_schema(None)
+
+
+def test_mysql_system_schema_detection() -> None:
+    my = MySQLAdapter(_config(EngineType.MYSQL))
+    for s in ("information_schema", "mysql", "performance_schema", "sys"):
+        assert my.is_system_schema(s)
+    assert not my.is_system_schema("appdb")
+
+
+def test_mssql_system_schema_detection() -> None:
+    ms = MSSQLAdapter(_config(EngineType.MSSQL))
+    assert ms.is_system_schema("sys")
+    assert ms.is_system_schema("INFORMATION_SCHEMA")  # case-insensitive
+    assert ms.is_system_schema("db_owner")
+    assert not ms.is_system_schema("dbo")
+    assert not ms.is_system_schema("sales")
+
+
+# --- create_database name validation (defence-in-depth) ----------------------------------
+
+
+async def test_create_database_rejects_invalid_names() -> None:
+    from app.core.exceptions import ValidationError
+
+    pg = PostgreSQLAdapter(_config(EngineType.POSTGRESQL))
+    for bad in ("1bad", "has space", "drop;table", "weird*name", "", "x" * 64):
+        with pytest.raises(ValidationError):
+            await pg.create_database(bad)

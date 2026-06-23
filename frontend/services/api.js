@@ -70,6 +70,9 @@ export class Api {
     // Not cached (mutates session state); cache is cleared on the active-database change.
     return this.http.post(`/sessions/${sessionId}/database`, { database });
   }
+  createDatabase(sessionId, name) {
+    return this.http.post(`/sessions/${sessionId}/databases`, { name });
+  }
 
   // --- schema introspection (cached; invalidated on session/database change) ---
   listSchemas(sessionId) {

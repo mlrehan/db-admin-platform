@@ -95,6 +95,25 @@ class AccessPolicy:
             return False
         return any(_scope_match(g.database, database) for g in self.grants)
 
+    def can_create_database(self) -> bool:
+        """Whether the subject may create a new database on the connection.
+
+        Admins always may. A non-admin may only if an admin granted them the ``CREATE``
+        operation at *connection scope* (no database/table restriction) — i.e. broad create
+        rights on the whole server, not a single-table CREATE grant. Default-deny otherwise.
+        """
+        if self.is_admin:
+            return True
+        if not self.has_grants:
+            return False
+        return any(
+            SqlOperation.CREATE in g.operations
+            and g.database in (None, "*")
+            and g.table_schema in (None, "*")
+            and g.table_name in (None, "*")
+            for g in self.grants
+        )
+
     def table_visible(self, database: str | None, schema: str | None, table: str) -> bool:
         if self.is_admin:
             return True

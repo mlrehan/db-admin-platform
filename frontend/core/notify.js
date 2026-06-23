@@ -83,6 +83,36 @@ export async function confirm({
   return res.isConfirmed;
 }
 
+// Ask the user for a single line of text. Resolves to the trimmed string, or null if
+// cancelled. Falls back to the native prompt if SweetAlert2 is unavailable.
+export async function promptText({
+  title = "Enter a value",
+  text = "",
+  placeholder = "",
+  confirmText = "OK",
+  value = "",
+} = {}) {
+  const Swal = await loadSwal();
+  if (!Swal) {
+    const r = window.prompt(`${title}${text ? `\n${text}` : ""}`, value);
+    return r == null ? null : r.trim();
+  }
+  const res = await Swal.fire({
+    title,
+    text,
+    input: "text",
+    inputValue: value,
+    inputPlaceholder: placeholder,
+    showCancelButton: true,
+    confirmButtonText: confirmText,
+    cancelButtonText: "Cancel",
+    reverseButtons: true,
+    inputValidator: (v) => (v && v.trim() ? undefined : "Please enter a value"),
+    ...themed(),
+  });
+  return res.isConfirmed ? String(res.value).trim() : null;
+}
+
 // Show a blocking busy/loading dialog; returns a function to close it.
 export async function loading(title = "Working…", text = "") {
   const Swal = await loadSwal();
