@@ -174,6 +174,49 @@ async def test_test_endpoint_ok_with_adapter(
     assert resp.json()["server_version"] == "fake-1.0"
 
 
+async def test_connection_databases_picker(
+    client: AsyncClient, seed_users, fake_pg: None
+) -> None:
+    admin = _auth(await _login(client, "admin@test.com", "admin-password-123"))
+    conn_id = (
+        await client.post("/api/v1/connections", headers=admin, json=_payload())
+    ).json()["id"]
+    resp = await client.get(f"/api/v1/connections/{conn_id}/databases", headers=admin)
+    assert resp.status_code == 200, resp.text
+    assert {"appdb", "analytics", "reporting"} <= set(resp.json()["databases"])
+
+
+async def test_connection_tables_picker_excludes_system_schemas(
+    client: AsyncClient, seed_users, fake_pg: None
+) -> None:
+    admin = _auth(await _login(client, "admin@test.com", "admin-password-123"))
+    conn_id = (
+        await client.post("/api/v1/connections", headers=admin, json=_payload())
+    ).json()["id"]
+    resp = await client.get(
+        f"/api/v1/connections/{conn_id}/tables?database=appdb", headers=admin
+    )
+    assert resp.status_code == 200, resp.text
+    tables = resp.json()["tables"]
+    names = {t["name"] for t in tables}
+    assert {"users", "orders", "active_users"} <= names
+    # System schema tables (pg_catalog) must never be offered in the picker.
+    assert all(t["schema_name"] != "pg_catalog" for t in tables)
+
+
+async def test_connection_picker_requires_owner_or_admin(
+    client: AsyncClient, seed_users, fake_pg: None
+) -> None:
+    admin = _auth(await _login(client, "admin@test.com", "admin-password-123"))
+    conn_id = (
+        await client.post("/api/v1/connections", headers=admin, json=_payload())
+    ).json()["id"]
+    viewer = _auth(await _login(client, "viewer@test.com", "viewer-password-123"))
+    # A non-owner, non-admin can't introspect the connection (404 — no existence leak).
+    got = await client.get(f"/api/v1/connections/{conn_id}/databases", headers=viewer)
+    assert got.status_code == 404
+
+
 async def test_open_list_and_close_session(
     client: AsyncClient, seed_users, fake_pg: None
 ) -> None:

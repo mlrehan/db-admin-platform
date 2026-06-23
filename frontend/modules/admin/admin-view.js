@@ -139,9 +139,15 @@ export class AdminView extends HTMLElement {
         </select></div>
       <div class="row">
         <div class="field" style="flex:1"><label>Database (blank = any)</label>
-          <input class="input" name="database" placeholder="*" value="${escapeHtml(existing?.database ?? "")}"></div>
+          <input class="input" name="database" list="grant-db-list" autocomplete="off"
+            placeholder="Pick or type…" value="${escapeHtml(existing?.database ?? "")}">
+          <datalist id="grant-db-list"></datalist>
+          <span class="muted hint" data-hint="db" style="font-size:var(--fs-xs)"></span></div>
         <div class="field" style="flex:1"><label>Table (blank = any)</label>
-          <input class="input" name="table_name" placeholder="*" value="${escapeHtml(existing?.table_name ?? "")}"></div>
+          <input class="input" name="table_name" list="grant-table-list" autocomplete="off"
+            placeholder="Pick or type…" value="${escapeHtml(existing?.table_name ?? "")}">
+          <datalist id="grant-table-list"></datalist>
+          <span class="muted hint" data-hint="table" style="font-size:var(--fs-xs)"></span></div>
       </div>
       <div class="field"><label>Operations</label>
         <div class="ops-grid">
@@ -160,11 +166,70 @@ export class AdminView extends HTMLElement {
       subjSel.innerHTML = subjOptions(typeSel.value);
     });
 
+    // Database/Table pickers: suggest the connection's real databases & tables (datalist), so
+    // the admin can't accidentally grant an empty/wrong database — while still being able to
+    // type any value by hand. If introspection fails, the inputs just behave as plain text.
+    const connSel = form.querySelector('[name="connection_id"]');
+    const dbInput = form.querySelector('[name="database"]');
+    const tableInput = form.querySelector('[name="table_name"]');
+    const dbList = form.querySelector("#grant-db-list");
+    const tableList = form.querySelector("#grant-table-list");
+    const dbHint = form.querySelector('[data-hint="db"]');
+    const tableHint = form.querySelector('[data-hint="table"]');
+    const fillList = (el, values) => {
+      el.innerHTML = values.map((v) => `<option value="${escapeHtml(v)}"></option>`).join("");
+    };
+
+    const loadTables = async () => {
+      const connId = connSel.value;
+      if (!connId) return;
+      tableHint.textContent = "Loading tables…";
+      try {
+        const res = await app.api.listConnectionTables(connId, dbInput.value || undefined);
+        const names = [...new Set((res.tables || []).map((t) => t.name))].sort();
+        fillList(tableList, names);
+        tableHint.textContent = names.length
+          ? `${names.length} table(s) — blank = any`
+          : "No tables found — blank = any";
+      } catch {
+        fillList(tableList, []);
+        tableHint.textContent = ""; // silent fallback: input still works as free text
+      }
+    };
+
+    const loadDatabases = async () => {
+      const connId = connSel.value;
+      if (!connId) return;
+      dbHint.textContent = "Loading databases…";
+      try {
+        const res = await app.api.listConnectionDatabases(connId);
+        const names = (res.databases || []).slice().sort();
+        fillList(dbList, names);
+        dbHint.textContent = names.length
+          ? `${names.length} database(s) — blank = any`
+          : "No databases found — blank = any";
+      } catch {
+        fillList(dbList, []);
+        dbHint.textContent = "";
+      }
+      await loadTables();
+    };
+
+    // Reload tables when the chosen database changes; reload everything if the connection does.
+    dbInput.addEventListener("change", () => loadTables());
+    connSel.addEventListener("change", () => {
+      dbInput.value = "";
+      tableInput.value = "";
+      loadDatabases();
+    });
+
     const close = openModal({
       title: existing ? "Edit access grant" : "New access grant",
       content: form,
       width: 480,
     });
+    // Populate suggestions once the modal is open (non-blocking).
+    loadDatabases();
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const ops = [...form.querySelectorAll(".op-check input:checked")].map((c) => c.value);

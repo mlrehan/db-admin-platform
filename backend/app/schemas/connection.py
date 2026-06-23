@@ -74,3 +74,16 @@ class ConnectionTestResponse(BaseModel):
     message: str
     server_version: str | None = None
     latency_ms: float | None = None
+
+
+class ConnectionDatabasesResponse(BaseModel):
+    databases: list[str]
+
+
+class GrantTableOut(BaseModel):
+    schema_name: str | None
+    name: str
+
+
+class ConnectionTablesResponse(BaseModel):
+    tables: list[GrantTableOut]

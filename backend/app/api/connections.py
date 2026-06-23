@@ -19,9 +19,12 @@ from app.db.adapters.registry import create_adapter
 from app.models.connection import Connection
 from app.schemas.connection import (
     ConnectionCreate,
+    ConnectionDatabasesResponse,
     ConnectionRead,
+    ConnectionTablesResponse,
     ConnectionTestResponse,
     ConnectionUpdate,
+    GrantTableOut,
 )
 from app.services.access_control import AccessControlService
 from app.services.connection_service import ConnectionService
@@ -134,3 +137,64 @@ async def test_connection(
         server_version=result.server_version,
         latency_ms=result.latency_ms,
     )
+
+
+# Cap how many tables we enumerate for the grant picker (keeps the response small on large
+# databases; the admin can still type any table name by hand).
+_MAX_PICKER_TABLES = 2000
+
+
+@router.get(
+    "/{connection_id}/databases",
+    response_model=ConnectionDatabasesResponse,
+    dependencies=[_can_use],
+)
+async def list_connection_databases(
+    connection_id: uuid.UUID,
+    user: CurrentUser,
+    service: Annotated[ConnectionService, Depends(get_connection_service)],
+) -> ConnectionDatabasesResponse:
+    """List the databases on a saved connection's server, for the access-grant picker.
+
+    Read-only and self-contained (a throwaway adapter, like ``test_connection``). System
+    databases are already excluded by the adapter's ``hidden_databases``."""
+    conn = await service.get_owned(connection_id, user.id, allow_any=_is_admin(user))
+    adapter = create_adapter(service.resolve_config(conn))
+    try:
+        databases = await adapter.list_databases()
+    finally:
+        await adapter.close()
+    return ConnectionDatabasesResponse(databases=[d.name for d in databases])
+
+
+@router.get(
+    "/{connection_id}/tables",
+    response_model=ConnectionTablesResponse,
+    dependencies=[_can_use],
+)
+async def list_connection_tables(
+    connection_id: uuid.UUID,
+    user: CurrentUser,
+    service: Annotated[ConnectionService, Depends(get_connection_service)],
+    database: Annotated[str | None, Query(max_length=255)] = None,
+) -> ConnectionTablesResponse:
+    """List tables (across non-system schemas) in one database, for the access-grant picker."""
+    conn = await service.get_owned(connection_id, user.id, allow_any=_is_admin(user))
+    adapter = create_adapter(service.resolve_config(conn))
+    is_system = getattr(adapter, "is_system_schema", lambda _n: False)
+    tables: list[GrantTableOut] = []
+    try:
+        if database:
+            await adapter.use_database(database)
+        for schema in await adapter.list_schemas():
+            if is_system(schema.name):
+                continue
+            for t in await adapter.list_tables(schema.name):
+                tables.append(GrantTableOut(schema_name=t.schema, name=t.name))
+                if len(tables) >= _MAX_PICKER_TABLES:
+                    break
+            if len(tables) >= _MAX_PICKER_TABLES:
+                break
+    finally:
+        await adapter.close()
+    return ConnectionTablesResponse(tables=tables)

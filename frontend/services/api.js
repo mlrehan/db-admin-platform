@@ -27,6 +27,14 @@ export class Api {
   testConnection(id) {
     return this.http.post(`/connections/${id}/test`);
   }
+  // Introspection for the access-grant picker (admin/owner only).
+  listConnectionDatabases(id) {
+    return this.http.get(`/connections/${id}/databases`);
+  }
+  listConnectionTables(id, database) {
+    const q = database ? `?database=${encodeURIComponent(database)}` : "";
+    return this.http.get(`/connections/${id}/tables${q}`);
+  }
 
   // --- live sessions ---
   openSession(connectionId) {
