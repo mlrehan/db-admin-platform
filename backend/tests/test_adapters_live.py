@@ -208,3 +208,27 @@ async def test_postgresql_cancellation_recovers() -> None:
         assert res.rows[0][0] == 42
     finally:
         await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_postgresql_create_database_runs_in_autocommit() -> None:
+    """CREATE DATABASE cannot run inside a transaction block; execute() must route it to
+    AUTOCOMMIT. This reproduces the production error and proves the fix end-to-end."""
+    config = _config_from_env("TEST_PG", EngineType.POSTGRESQL)
+    if config is None:
+        pytest.skip("TEST_PG_HOST not set")
+    adapter = PostgreSQLAdapter(config)
+    await adapter.connect()
+    name = "lait_autocommit_test"
+    try:
+        await adapter.execute(f'DROP DATABASE IF EXISTS "{name}"')
+        result = await adapter.execute(f"CREATE DATABASE {name}")  # would raise before the fix
+        assert result.returns_rows is False
+        # Confirm it now exists.
+        check = await adapter.execute(
+            "SELECT 1 FROM pg_database WHERE datname = :n", {"n": name}
+        )
+        assert check.row_count == 1
+    finally:
+        await adapter.execute(f'DROP DATABASE IF EXISTS "{name}"')
+        await adapter.close()

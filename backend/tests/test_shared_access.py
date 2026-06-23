@@ -74,6 +74,44 @@ async def test_granted_user_can_use_shared_connection(client: AsyncClient, seed_
     assert denied.json()["error"]["code"] == "ACCESS_DENIED"
 
 
+async def test_granted_single_db_user_queries_without_manual_switch(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    """Regression: a user granted ONE database + SELECT must be able to query immediately
+    after opening a session — without first switching the database in the UI. Previously the
+    session opened with no active database, so the SELECT was wrongly denied."""
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    conn = await client.post(
+        "/api/v1/connections", headers=admin,
+        json={"name": "srv", "engine": "postgresql", "host": "h",
+              "username": "svc", "password": "secret-password-1"},  # server-level (no database)
+    )
+    conn_id = conn.json()["id"]
+    created = await client.post(
+        "/api/v1/users", headers=admin,
+        json={"email": "reader@test.com", "password": "reader-pass-1", "role": "viewer"},
+    )
+    reader_id = created.json()["id"]
+    await client.post(
+        "/api/v1/access/grants", headers=admin,
+        json={"subject_type": "user", "subject_id": reader_id, "connection_id": conn_id,
+              "operations": ["SELECT"], "database": "appdb"},
+    )
+    reader = await _login(client, "reader@test.com", "reader-pass-1")
+
+    opened = await client.post("/api/v1/sessions", headers=reader, json={"connection_id": conn_id})
+    assert opened.status_code == 201, opened.text
+    body = opened.json()
+    sid = body["id"]
+    # The session is already pointed at the single granted database.
+    assert body["active_database"] == "appdb"
+
+    # SELECT works straight away — no manual database switch needed.
+    ok = await client.post(f"/api/v1/sessions/{sid}/query", headers=reader,
+                           json={"sql": "SELECT * FROM tutor"})
+    assert ok.status_code == 200, ok.text
+
+
 async def test_logout_closes_open_sessions(client: AsyncClient, seed_users, fake_pg) -> None:
     admin = await _login(client, "admin@test.com", "admin-password-123")
     conn = await client.post(

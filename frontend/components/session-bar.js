@@ -11,7 +11,17 @@ import { escapeHtml } from "./view-helpers.js";
 export class SessionBar extends HTMLElement {
   async connectedCallback() {
     this.classList.add("session-bar");
+    // A DDL run (e.g. CREATE DATABASE) may have changed the database list — reload it so the
+    // new database appears immediately.
+    this._unsubMeta = bus.on(Events.METADATA_CHANGED, () => {
+      const sid = sessionStore.getState().sessionId;
+      if (sid) this._loadDatabases(sid);
+    });
     await this.refresh();
+  }
+
+  disconnectedCallback() {
+    this._unsubMeta?.();
   }
 
   async refresh() {
@@ -88,16 +98,36 @@ export class SessionBar extends HTMLElement {
     if (!select) return;
     try {
       const databases = await app.api.listDatabases(sessionId);
-      const activeDb = sessionStore.getState().database;
-      select.innerHTML = databases
-        .map(
-          (d) =>
-            `<option value="${escapeHtml(d.name)}" ${
-              d.name === activeDb || d.is_active ? "selected" : ""
-            }>${escapeHtml(d.name)}</option>`
-        )
-        .join("");
+      const names = databases.map((d) => d.name);
+      const sess = (this._sessions || []).find((s) => s.id === sessionId);
+      const serverActive = sess?.active_database || "";
+      const storeDb = sessionStore.getState().database;
+      // Choose which database to show as active: the user's stored choice, else the server's
+      // current database, else any flagged active, else the first available one.
+      let desired = "";
+      if (storeDb && names.includes(storeDb)) desired = storeDb;
+      else if (serverActive && names.includes(serverActive)) desired = serverActive;
+      else desired = databases.find((d) => d.is_active)?.name || names[0] || "";
+
+      select.innerHTML =
+        databases
+          .map(
+            (d) =>
+              `<option value="${escapeHtml(d.name)}" ${
+                d.name === desired ? "selected" : ""
+              }>${escapeHtml(d.name)}</option>`
+          )
+          .join("") || `<option value="">—</option>`;
       select.disabled = databases.length === 0;
+
+      // The dropdown must never lie: if what we show as selected isn't what the server is
+      // actually using, switch the server to it. This is what makes a granted user's session
+      // target the right database so their queries aren't wrongly denied.
+      if (desired && desired !== serverActive) {
+        await this._switchDatabase(desired, { silent: true });
+      } else if (desired) {
+        setActiveDatabase(desired);
+      }
     } catch {
       select.innerHTML = `<option value="">—</option>`;
       select.disabled = true;
@@ -140,15 +170,22 @@ export class SessionBar extends HTMLElement {
     }
   }
 
-  async _switchDatabase(database) {
+  async _switchDatabase(database, { silent = false } = {}) {
     const sessionId = sessionStore.getState().sessionId;
     if (!sessionId || !database) return;
     try {
       await app.api.switchDatabase(sessionId, database);
       setActiveDatabase(database);
-      bus.emit(Events.TOAST, { message: `Using database "${database}"`, kind: "success" });
+      // Keep the cached session object in sync so a later reload doesn't switch again.
+      const sess = (this._sessions || []).find((s) => s.id === sessionId);
+      if (sess) sess.active_database = database;
+      if (!silent) {
+        bus.emit(Events.TOAST, { message: `Using database "${database}"`, kind: "success" });
+      }
     } catch (err) {
-      bus.emit(Events.TOAST, { message: err?.message || "Switch failed", kind: "error" });
+      if (!silent) {
+        bus.emit(Events.TOAST, { message: err?.message || "Switch failed", kind: "error" });
+      }
     }
   }
 

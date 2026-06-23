@@ -193,6 +193,16 @@ class AccessControlService:
             return True
         return bool(await self._grants_for(user, connection_id))
 
+    async def granted_databases(self, user: User, connection_id: uuid.UUID) -> set[str]:
+        """The distinct, specific databases a non-admin is granted on a connection.
+
+        Grants with no database scope (wildcard) contribute nothing here. Admins return an
+        empty set (they are not constrained to any database)."""
+        if Role(user.role) == Role.ADMIN:
+            return set()
+        grants = await self._grants_for(user, connection_id)
+        return {g.database for g in grants if g.database and g.database != "*"}
+
     async def granted_connection_ids(self, user: User) -> set[uuid.UUID]:
         """Connection ids the user has any grant on (i.e. connections shared with them)."""
         result = await self._session.execute(

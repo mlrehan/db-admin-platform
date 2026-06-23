@@ -201,3 +201,22 @@ async def test_create_database_rejects_invalid_names() -> None:
     for bad in ("1bad", "has space", "drop;table", "weird*name", "", "x" * 64):
         with pytest.raises(ValidationError):
             await pg.create_database(bad)
+
+
+# --- non-transactional statement routing (CREATE DATABASE etc. need AUTOCOMMIT) ----------
+
+
+def test_requires_autocommit_detection() -> None:
+    from app.db.adapters.sqlalchemy_adapter import _requires_autocommit  # noqa: PLC0415
+
+    must = [
+        "CREATE DATABASE lait", "create database lait;", "  CREATE   DATABASE x",
+        "DROP DATABASE x", "ALTER DATABASE x SET y = 1", "VACUUM ANALYZE",
+        "CREATE INDEX CONCURRENTLY ix ON t(c)", "DROP INDEX CONCURRENTLY ix",
+    ]
+    must_not = [
+        "SELECT * FROM tutor", "CREATE TABLE t(id int)", "CREATE INDEX ix ON t(c)",
+        "DROP TABLE t", "ALTER TABLE t ADD c int", "INSERT INTO t VALUES (1)",
+    ]
+    assert all(_requires_autocommit(s) for s in must)
+    assert not any(_requires_autocommit(s) for s in must_not)

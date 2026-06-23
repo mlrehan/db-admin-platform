@@ -56,6 +56,24 @@ _POOL_RECYCLE_SECONDS = 1800
 # defence-in-depth against injection, not the only guard.
 _DB_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$-]{0,62}$")
 
+# Statements that some engines (notably PostgreSQL and SQL Server) refuse to run inside a
+# transaction block. They must execute in AUTOCOMMIT instead. Running a single statement in
+# autocommit is equivalent to begin()+commit(), so this never changes transactional semantics
+# for the statements listed here — it only avoids the "cannot run inside a transaction" error.
+_AUTOCOMMIT_RE = re.compile(
+    r"^\s*(?:"
+    r"CREATE\s+DATABASE|DROP\s+DATABASE|ALTER\s+DATABASE|"
+    r"CREATE\s+TABLESPACE|DROP\s+TABLESPACE|"
+    r"VACUUM|ALTER\s+SYSTEM|"
+    r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY|DROP\s+INDEX\s+CONCURRENTLY"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _requires_autocommit(statement: str) -> bool:
+    return bool(_AUTOCOMMIT_RE.match(statement or ""))
+
 
 class SQLAlchemyAdapter(DatabaseAdapter):
     # Subclasses must set these.
@@ -281,6 +299,36 @@ class SQLAlchemyAdapter(DatabaseAdapter):
     def _rows_affected(rowcount: int | None) -> int | None:
         return rowcount if rowcount is not None and rowcount >= 0 else None
 
+    def _result_from(self, result: Any, start: float, max_rows: int) -> QueryResult:
+        """Build a :class:`QueryResult` from a freshly-executed cursor result."""
+        if result.returns_rows:
+            # Fetch one extra row to detect truncation without scanning everything.
+            fetched = result.fetchmany(max_rows + 1)
+            truncated = len(fetched) > max_rows
+            rows = [tuple(row) for row in fetched[:max_rows]]
+            columns = [QueryColumn(name=str(k)) for k in result.keys()]
+            elapsed = (time.perf_counter() - start) * 1000
+            return QueryResult(
+                columns=columns,
+                rows=rows,
+                row_count=len(rows),
+                rows_affected=None,
+                execution_ms=round(elapsed, 3),
+                truncated=truncated,
+                returns_rows=True,
+            )
+        affected = self._rows_affected(result.rowcount)
+        elapsed = (time.perf_counter() - start) * 1000
+        return QueryResult(
+            columns=[],
+            rows=[],
+            row_count=0,
+            rows_affected=affected,
+            execution_ms=round(elapsed, 3),
+            truncated=False,
+            returns_rows=False,
+        )
+
     async def execute(
         self,
         statement: str,
@@ -289,36 +337,16 @@ class SQLAlchemyAdapter(DatabaseAdapter):
         max_rows: int = 1000,
     ) -> QueryResult:
         start = time.perf_counter()
+        if _requires_autocommit(statement):
+            # CREATE DATABASE / VACUUM / … cannot run inside a transaction on some engines.
+            async with self.acquire() as conn:
+                autocommit = await conn.execution_options(isolation_level="AUTOCOMMIT")
+                result = await autocommit.execute(text(statement), dict(parameters or {}))
+                return self._result_from(result, start, max_rows)
         async with self.acquire() as conn:
             async with conn.begin():
                 result = await conn.execute(text(statement), dict(parameters or {}))
-                if result.returns_rows:
-                    # Fetch one extra row to detect truncation without scanning everything.
-                    fetched = result.fetchmany(max_rows + 1)
-                    truncated = len(fetched) > max_rows
-                    rows = [tuple(row) for row in fetched[:max_rows]]
-                    columns = [QueryColumn(name=str(k)) for k in result.keys()]
-                    elapsed = (time.perf_counter() - start) * 1000
-                    return QueryResult(
-                        columns=columns,
-                        rows=rows,
-                        row_count=len(rows),
-                        rows_affected=None,
-                        execution_ms=round(elapsed, 3),
-                        truncated=truncated,
-                        returns_rows=True,
-                    )
-                affected = self._rows_affected(result.rowcount)
-                elapsed = (time.perf_counter() - start) * 1000
-                return QueryResult(
-                    columns=[],
-                    rows=[],
-                    row_count=0,
-                    rows_affected=affected,
-                    execution_ms=round(elapsed, 3),
-                    truncated=False,
-                    returns_rows=False,
-                )
+                return self._result_from(result, start, max_rows)
 
     async def stream(
         self,

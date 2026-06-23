@@ -76,6 +76,17 @@ async def open_session(
     session = await orchestrator.open_session(
         user_id=user.id, connection_id=conn.id, config=config
     )
+    # If a non-admin is granted exactly one specific database on a server-level connection,
+    # point the new session at it immediately. Otherwise their first query would run against
+    # the server's default database (active_database=None) and be denied by the access policy,
+    # even though they can see the granted database in the picker.
+    if not is_admin and session.adapter.active_database is None:
+        granted = await access.granted_databases(user, conn.id)
+        if len(granted) == 1:
+            try:
+                await session.adapter.use_database(next(iter(granted)))
+            except Exception:  # noqa: BLE001 - best-effort; session still opens
+                pass
     return _to_read(session, can_create_database=await _can_create_db(access, user, conn.id))
 
 
