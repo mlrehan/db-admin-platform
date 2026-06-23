@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
 #  - msodbcsql18: Microsoft ODBC driver for SQL Server (from the Microsoft apt repo)
 #  - curl/gnupg: fetch the Microsoft signing key + repo
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl gnupg ca-certificates build-essential unixodbc-dev \
+        curl gnupg ca-certificates build-essential unixodbc unixodbc-dev \
     && curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
         | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/microsoft-prod.gpg] \
@@ -19,8 +19,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         > /etc/apt/sources.list.d/mssql-release.list \
     && apt-get update \
     && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 \
-    && apt-get purge -y --auto-remove curl gnupg \
     && rm -rf /var/lib/apt/lists/*
+
+# Fail the build immediately if the SQL Server ODBC driver did not install correctly or is not
+# loadable on this architecture. Catches the misleading runtime "[01000] Can't open lib ...
+# file not found" error (which really means missing file, wrong CPU arch, or unmet .so deps).
+RUN ldconfig \
+    && driver="$(awk -F'= *' 'tolower($1) ~ /^driver$/ {print $2; exit}' /etc/odbcinst.ini)" \
+    && echo "Registered MSSQL ODBC driver: ${driver:-<none>}" \
+    && test -n "$driver" && test -f "$driver" \
+    && if ldd "$driver" | grep -q 'not found'; then \
+         echo "ERROR: msodbcsql18 has unmet shared-library dependencies:"; ldd "$driver"; exit 1; \
+       fi \
+    && echo "MSSQL ODBC driver OK ($(uname -m))"
 
 WORKDIR /app
 
