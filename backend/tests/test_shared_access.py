@@ -112,6 +112,75 @@ async def test_granted_single_db_user_queries_without_manual_switch(
     assert ok.status_code == 200, ok.text
 
 
+async def test_grant_with_multiple_databases(client: AsyncClient, seed_users, fake_pg) -> None:
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    conn = await client.post(
+        "/api/v1/connections", headers=admin,
+        json={"name": "srv", "engine": "postgresql", "host": "h",
+              "username": "svc", "password": "secret-password-1"},
+    )
+    conn_id = conn.json()["id"]
+    uid = (await client.post(
+        "/api/v1/users", headers=admin,
+        json={"email": "multi@test.com", "password": "multi-pass-1", "role": "viewer"},
+    )).json()["id"]
+    # One grant covering TWO databases (any table), SELECT only.
+    g = await client.post(
+        "/api/v1/access/grants", headers=admin,
+        json={"subject_type": "user", "subject_id": uid, "connection_id": conn_id,
+              "operations": ["SELECT"], "databases": ["appdb", "analytics"]},
+    )
+    assert g.status_code == 201, g.text
+    assert set(g.json()["databases"]) == {"appdb", "analytics"}
+
+    user = await _login(client, "multi@test.com", "multi-pass-1")
+    sid = (await client.post("/api/v1/sessions", headers=user,
+                             json={"connection_id": conn_id})).json()["id"]
+    # Both granted databases are visible; the third is not.
+    dbs = await client.get(f"/api/v1/sessions/{sid}/databases", headers=user)
+    assert {d["name"] for d in dbs.json()} == {"appdb", "analytics"}
+    # Can query in either granted database.
+    for db in ("appdb", "analytics"):
+        assert (await client.post(f"/api/v1/sessions/{sid}/database", headers=user,
+                                  json={"database": db})).status_code == 200
+        ok = await client.post(f"/api/v1/sessions/{sid}/query", headers=user,
+                               json={"sql": "SELECT * FROM users"})
+        assert ok.status_code == 200, ok.text
+    # The non-granted database is denied.
+    assert (await client.post(f"/api/v1/sessions/{sid}/database", headers=user,
+                              json={"database": "reporting"})).status_code == 403
+
+
+async def test_grant_with_multiple_tables(client: AsyncClient, seed_users, fake_pg) -> None:
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    conn_id = (await client.post(
+        "/api/v1/connections", headers=admin,
+        json={"name": "srv2", "engine": "postgresql", "host": "h",
+              "username": "svc", "password": "secret-password-1"},
+    )).json()["id"]
+    uid = (await client.post(
+        "/api/v1/users", headers=admin,
+        json={"email": "tbl@test.com", "password": "tbl-password-1", "role": "viewer"},
+    )).json()["id"]
+    # One database, two specific tables, SELECT only.
+    await client.post(
+        "/api/v1/access/grants", headers=admin,
+        json={"subject_type": "user", "subject_id": uid, "connection_id": conn_id,
+              "operations": ["SELECT"], "databases": ["appdb"], "tables": ["users", "orders"]},
+    )
+    user = await _login(client, "tbl@test.com", "tbl-password-1")
+    sid = (await client.post("/api/v1/sessions", headers=user,
+                             json={"connection_id": conn_id})).json()["id"]
+    # Granted tables are queryable; a non-granted table (active_users) is denied.
+    ok = await client.post(f"/api/v1/sessions/{sid}/query", headers=user,
+                           json={"sql": "SELECT * FROM orders"})
+    assert ok.status_code == 200, ok.text
+    denied = await client.post(f"/api/v1/sessions/{sid}/query", headers=user,
+                               json={"sql": "SELECT * FROM active_users"})
+    assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "ACCESS_DENIED"
+
+
 async def test_logout_closes_open_sessions(client: AsyncClient, seed_users, fake_pg) -> None:
     admin = await _login(client, "admin@test.com", "admin-password-123")
     conn = await client.post(

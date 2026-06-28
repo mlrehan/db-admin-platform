@@ -39,8 +39,9 @@ async def list_operations() -> OperationsResponse:
 async def list_grants(
     service: Annotated[AccessControlService, Depends(get_access_service)],
     connection_id: Annotated[uuid.UUID | None, Query()] = None,
-) -> list[AccessGrant]:
-    return await service.list_grants(connection_id=connection_id)
+) -> list[AccessGrantOut]:
+    grants = await service.list_grants(connection_id=connection_id)
+    return [AccessGrantOut.from_model(g) for g in grants]
 
 
 @router.post(
@@ -52,16 +53,19 @@ async def list_grants(
 async def create_grant(
     payload: AccessGrantCreate,
     service: Annotated[AccessControlService, Depends(get_access_service)],
-) -> AccessGrant:
-    return await service.create_grant(
+) -> AccessGrantOut:
+    grant = await service.create_grant(
         subject_type=payload.subject_type,
         subject_id=payload.subject_id,
         connection_id=payload.connection_id,
         operations=payload.operations,
+        databases=payload.databases,
+        tables=payload.tables,
         database=payload.database,
         table_schema=payload.table_schema,
         table_name=payload.table_name,
     )
+    return AccessGrantOut.from_model(grant)
 
 
 @router.patch("/grants/{grant_id}", response_model=AccessGrantOut, dependencies=[_admin_only])
@@ -69,15 +73,18 @@ async def update_grant(
     grant_id: uuid.UUID,
     payload: AccessGrantUpdate,
     service: Annotated[AccessControlService, Depends(get_access_service)],
-) -> AccessGrant:
-    return await service.update_grant(
+) -> AccessGrantOut:
+    grant = await service.update_grant(
         grant_id,
         operations=payload.operations,
+        databases=payload.databases,
+        tables=payload.tables,
         database=payload.database,
         table_schema=payload.table_schema,
         table_name=payload.table_name,
         clear_scope=True,
     )
+    return AccessGrantOut.from_model(grant)
 
 
 @router.delete(

@@ -46,13 +46,27 @@ export class AdminView extends HTMLElement {
   async _renderPermissions() {
     this._body.innerHTML = `<div class="placeholder">Loading…</div>`;
     try {
-      const [grants, connections] = await Promise.all([
+      const [grants, connections, users] = await Promise.all([
         app.api.listGrants(),
         app.api.listConnections(),
+        app.api.listUsers().catch(() => []),
       ]);
       this._connections = connections;
       const connName = (id) =>
         connections.find((c) => c.id === id)?.name || id.slice(0, 8);
+      const emailById = new Map(users.map((u) => [u.id, u.email]));
+      // Render a grant's subject clearly: which user (by email) or which role.
+      const subjectCell = (g) => {
+        if (g.subject_type === "role") {
+          return `<span class="badge">role</span> <strong>${escapeHtml(g.subject_id)}</strong>`;
+        }
+        const email = emailById.get(g.subject_id);
+        return `<span class="badge">user</span> ${escapeHtml(email || g.subject_id.slice(0, 8) + "…")}`;
+      };
+      const scopeCell = (values) =>
+        values && values.length
+          ? values.map((v) => `<span class="badge">${escapeHtml(v)}</span>`).join(" ")
+          : `<span class="muted">any</span>`;
       this._body.innerHTML = `
         <div class="row" style="padding:12px 16px; border-bottom:1px solid var(--border)">
           <span class="muted">${grants.length} grants — restrict which databases, tables and
@@ -61,16 +75,16 @@ export class AdminView extends HTMLElement {
           <button class="btn btn-primary" id="addgrant">+ New grant</button>
         </div>
         <table class="grid-table">
-          <thead><tr><th>Subject</th><th>Connection</th><th>Database</th><th>Table</th>
+          <thead><tr><th>Who</th><th>Connection</th><th>Databases</th><th>Tables</th>
             <th>Operations</th><th style="text-align:right">Actions</th></tr></thead>
           <tbody>${
             grants
               .map(
                 (g) => `<tr>
-              <td><span class="badge">${escapeHtml(g.subject_type)}</span> ${escapeHtml(g.subject_id.length > 12 ? g.subject_id.slice(0, 8) + "…" : g.subject_id)}</td>
+              <td>${subjectCell(g)}</td>
               <td>${escapeHtml(connName(g.connection_id))}</td>
-              <td class="mono">${escapeHtml(g.database || "*")}</td>
-              <td class="mono">${escapeHtml(g.table_name || "*")}</td>
+              <td>${scopeCell(g.databases)}</td>
+              <td>${scopeCell(g.tables)}</td>
               <td>${g.operations.map((o) => `<span class="badge">${escapeHtml(o)}</span>`).join(" ")}</td>
               <td style="text-align:right; white-space:nowrap">
                 <button class="btn btn-ghost" data-edit="${g.id}">Edit</button>
@@ -94,16 +108,19 @@ export class AdminView extends HTMLElement {
     }
   }
 
-  // Turn a plain <select> into a searchable TomSelect (no-op if the lib didn't load — the
-  // native select keeps working). TomSelect dispatches a native "change" on the underlying
-  // select, so cascade listeners still fire.
-  _enhanceSelect(sel) {
+  // Turn a <select multiple> into a searchable, tag-style TomSelect (no-op if the lib didn't
+  // load — the native multi-select keeps working). TomSelect mirrors the underlying select, so
+  // native "change" listeners still fire.
+  _enhanceMultiSelect(sel, placeholder) {
     if (!window.TomSelect) return;
     // eslint-disable-next-line no-new
     new window.TomSelect(sel, {
-      allowEmptyOption: true,
+      plugins: ["remove_button"],
+      maxItems: null,
+      maxOptions: 1000,
       create: false,
-      maxOptions: 500,
+      hideSelected: true,
+      placeholder,
     });
   }
 
@@ -154,11 +171,11 @@ export class AdminView extends HTMLElement {
           ${(this._connections || []).map((c) => `<option value="${c.id}" ${existing?.connection_id === c.id ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}
         </select></div>
       <div class="row">
-        <div class="field" style="flex:1"><label>Database (blank = any)</label>
-          <select class="input" name="database"><option value="">(any database)</option></select>
+        <div class="field" style="flex:1"><label>Databases (leave empty = any)</label>
+          <select class="input" name="databases" multiple></select>
           <span class="muted hint" data-hint="db" style="font-size:var(--fs-xs)"></span></div>
-        <div class="field" style="flex:1"><label>Table (blank = any)</label>
-          <select class="input" name="table_name"><option value="">(any table)</option></select>
+        <div class="field" style="flex:1"><label>Tables (leave empty = any)</label>
+          <select class="input" name="tables" multiple></select>
           <span class="muted hint" data-hint="table" style="font-size:var(--fs-xs)"></span></div>
       </div>
       <div class="field"><label>Operations</label>
@@ -178,77 +195,104 @@ export class AdminView extends HTMLElement {
       subjSel.innerHTML = subjOptions(typeSel.value);
     });
 
-    // Database/Table pickers: cascaded, searchable selects (TomSelect) populated from the
-    // connection's REAL databases & tables, so an admin can't grant an empty/wrong database.
-    // Selecting a database filters the table list. Leaving either blank means "any". Degrades
-    // to a plain <select> if TomSelect can't load, and to its existing value if the connection
-    // can't be introspected.
+    // Database/Table pickers: MULTI-select, searchable (TomSelect), cascaded from the
+    // connection's real databases/tables. Rules:
+    //   • Databases: pick zero (= any), one, or many.
+    //   • Tables are only meaningful for a SINGLE database, so the Tables picker is enabled
+    //     ONLY when exactly one database is selected; otherwise it's disabled (= any table).
+    // Degrades to native multi-selects if TomSelect can't load.
     const connSel = form.querySelector('[name="connection_id"]');
-    const dbSel = form.querySelector('[name="database"]');
-    const tableSel = form.querySelector('[name="table_name"]');
+    const dbSel = form.querySelector('[name="databases"]');
+    const tableSel = form.querySelector('[name="tables"]');
     const dbHint = form.querySelector('[data-hint="db"]');
     const tableHint = form.querySelector('[data-hint="table"]');
 
-    // Rebuild a <select>'s options ("(any)" first), preserving the desired current value even
-    // if it isn't in the fetched list. Re-applies TomSelect if it's active.
-    const setOptions = (sel, anyLabel, values, current) => {
-      const opts = [...new Set(values)];
-      if (current && !opts.includes(current)) opts.unshift(current);
+    const valuesOf = (sel) =>
+      sel.tomselect
+        ? [...sel.tomselect.getValue()].filter(Boolean)
+        : [...sel.selectedOptions].map((o) => o.value).filter(Boolean);
+
+    // Rebuild a multi-select's options, preserving any current values not in the fetched list,
+    // and pre-select `selected`. Re-applies TomSelect if available.
+    const setMulti = (sel, placeholder, values, selected) => {
+      const opts = [...new Set([...(selected || []), ...values])];
       sel.tomselect?.destroy();
-      sel.innerHTML =
-        `<option value="">${anyLabel}</option>` +
-        opts.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
-      sel.value = current || "";
-      this._enhanceSelect(sel);
+      sel.innerHTML = opts
+        .map(
+          (v) =>
+            `<option value="${escapeHtml(v)}" ${
+              (selected || []).includes(v) ? "selected" : ""
+            }>${escapeHtml(v)}</option>`
+        )
+        .join("");
+      this._enhanceMultiSelect(sel, placeholder);
     };
 
-    const loadTables = async (current = "") => {
-      const connId = connSel.value;
-      if (!connId) return;
+    const setTableDisabled = (disabled) => {
+      if (tableSel.tomselect) disabled ? tableSel.tomselect.disable() : tableSel.tomselect.enable();
+      else tableSel.disabled = disabled;
+    };
+
+    // Reflect the current database selection onto the Tables picker (enable + load, or disable).
+    const updateTables = async (selectedTables = []) => {
+      const dbs = valuesOf(dbSel);
+      if (dbs.length !== 1) {
+        setMulti(tableSel, "Any table", [], []);
+        setTableDisabled(true);
+        tableHint.textContent =
+          dbs.length === 0
+            ? "Tables apply to one database — select a single database to choose tables."
+            : "Multiple databases selected — all their tables are included.";
+        return;
+      }
       tableHint.textContent = "Loading tables…";
       try {
-        const res = await app.api.listConnectionTables(connId, dbSel.value || undefined);
+        const res = await app.api.listConnectionTables(connSel.value, dbs[0]);
         const names = [...new Set((res.tables || []).map((t) => t.name))].sort();
-        setOptions(tableSel, "(any table)", names, current);
+        setMulti(tableSel, "Any table", names, selectedTables);
+        setTableDisabled(false);
         tableHint.textContent = names.length
-          ? `${names.length} table(s) — or leave as any`
-          : "No tables — leave as any";
+          ? `${names.length} table(s) in ${dbs[0]} — leave empty for any`
+          : "No tables found — leave empty for any";
       } catch {
-        setOptions(tableSel, "(any table)", current ? [current] : [], current);
-        tableHint.textContent = "Couldn't list tables — leave as any";
+        setMulti(tableSel, "Any table", selectedTables, selectedTables);
+        setTableDisabled(false);
+        tableHint.textContent = "Couldn't list tables — leave empty for any";
       }
     };
 
-    const loadDatabases = async (curDb = "", curTable = "") => {
+    const loadDatabases = async (selectedDbs = [], selectedTables = []) => {
       const connId = connSel.value;
       if (!connId) return;
       dbHint.textContent = "Loading databases…";
       try {
         const res = await app.api.listConnectionDatabases(connId);
         const names = (res.databases || []).slice().sort();
-        setOptions(dbSel, "(any database)", names, curDb);
+        setMulti(dbSel, "Any database", names, selectedDbs);
         dbHint.textContent = names.length
-          ? `${names.length} database(s) — or leave as any`
-          : "No databases — leave as any";
+          ? `${names.length} database(s) — select one or more, or leave empty for any`
+          : "No databases — leave empty for any";
       } catch {
-        setOptions(dbSel, "(any database)", curDb ? [curDb] : [], curDb);
-        dbHint.textContent = "Couldn't list databases — leave as any";
+        setMulti(dbSel, "Any database", selectedDbs, selectedDbs);
+        dbHint.textContent = "Couldn't list databases — leave empty for any";
       }
-      await loadTables(curTable);
+      // Cascade after (re)building the database picker.
+      dbSel.tomselect?.off("change");
+      dbSel.tomselect?.on("change", () => updateTables());
+      dbSel.addEventListener("change", () => updateTables());
+      await updateTables(selectedTables);
     };
 
-    // Cascade: a new database reloads the table list; a new connection reloads both.
-    dbSel.addEventListener("change", () => loadTables());
     connSel.addEventListener("change", () => loadDatabases());
 
     const close = openModal({
       title: existing ? "Edit access grant" : "New access grant",
       content: form,
-      width: 480,
+      width: 520,
     });
     // Load TomSelect (non-blocking), then populate, preselecting the grant's current scope.
     loadTomSelect().finally(() =>
-      loadDatabases(existing?.database ?? "", existing?.table_name ?? "")
+      loadDatabases(existing?.databases ?? [], existing?.tables ?? [])
     );
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -258,13 +302,12 @@ export class AdminView extends HTMLElement {
         return;
       }
       const d = Object.fromEntries(new FormData(form).entries());
+      const databases = valuesOf(dbSel);
+      // Tables only apply when exactly one database is chosen.
+      const tables = databases.length === 1 ? valuesOf(tableSel) : [];
       try {
         if (existing) {
-          await app.api.updateGrant(existing.id, {
-            operations: ops,
-            database: d.database || null,
-            table_name: d.table_name || null,
-          });
+          await app.api.updateGrant(existing.id, { operations: ops, databases, tables });
           bus.emit(Events.TOAST, { message: "Grant updated", kind: "success" });
         } else {
           await app.api.createGrant({
@@ -272,8 +315,8 @@ export class AdminView extends HTMLElement {
             subject_id: d.subject_id,
             connection_id: d.connection_id,
             operations: ops,
-            database: d.database || null,
-            table_name: d.table_name || null,
+            databases,
+            tables,
           });
           bus.emit(Events.TOAST, { message: "Grant created", kind: "success" });
         }

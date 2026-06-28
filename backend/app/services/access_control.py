@@ -36,26 +36,37 @@ def _ci_eq(a: str | None, b: str | None) -> bool:
     return (a or "").lower() == (b or "").lower()
 
 
-def _scope_match(grant_value: str | None, actual: str | None) -> bool:
-    """A scope field matches if the grant is wildcard (None/'*') or equals the actual value."""
-    if grant_value in (None, "*"):
+def _normalize_scope(values) -> tuple[str, ...]:
+    """Clean a scope list: drop blanks and the '*' wildcard (which means "any" → empty)."""
+    out: list[str] = []
+    for v in values or []:
+        s = (str(v) or "").strip()
+        if s and s != "*":
+            out.append(s)
+    return tuple(out)
+
+
+def _list_match(grant_values: tuple[str, ...], actual: str | None) -> bool:
+    """A scope dimension matches if the grant lists nothing (any) or contains ``actual``."""
+    if not grant_values:
         return True
     if actual is None:
         return False
-    return _ci_eq(grant_value, actual)
+    al = actual.lower()
+    return any(v.lower() == al for v in grant_values)
 
 
 @dataclass(frozen=True)
 class GrantSpec:
     operations: frozenset[SqlOperation]
-    database: str | None
-    table_schema: str | None
-    table_name: str | None
+    databases: tuple[str, ...]  # empty = any database
+    tables: tuple[str, ...]  # empty = any table
+    table_schema: str | None = None
 
     def scope_covers(self, database: str | None, schema: str | None, table: str | None) -> bool:
-        if not _scope_match(self.database, database):
+        if not _list_match(self.databases, database):
             return False
-        if not _scope_match(self.table_name, table):
+        if not _list_match(self.tables, table):
             return False
         # Only constrain schema when both grant and query specify it.
         if self.table_schema and schema and not _ci_eq(self.table_schema, schema):
@@ -72,11 +83,18 @@ class GrantSpec:
         ops = frozenset(
             SqlOperation(o) for o in (grant.operations or []) if o in SqlOperation._value2member_map_
         )
+        # Prefer the JSON arrays; fall back to the legacy scalar columns for old rows.
+        raw_dbs = grant.databases if grant.databases is not None else (
+            [grant.database] if grant.database else []
+        )
+        raw_tbls = grant.tables if grant.tables is not None else (
+            [grant.table_name] if grant.table_name else []
+        )
         return cls(
             operations=ops,
-            database=grant.database,
+            databases=_normalize_scope(raw_dbs),
+            tables=_normalize_scope(raw_tbls),
             table_schema=grant.table_schema,
-            table_name=grant.table_name,
         )
 
 
@@ -93,7 +111,7 @@ class AccessPolicy:
             return True
         if not self.has_grants:
             return False
-        return any(_scope_match(g.database, database) for g in self.grants)
+        return any(_list_match(g.databases, database) for g in self.grants)
 
     def can_create_database(self) -> bool:
         """Whether the subject may create a new database on the connection.
@@ -107,10 +125,7 @@ class AccessPolicy:
         if not self.has_grants:
             return False
         return any(
-            SqlOperation.CREATE in g.operations
-            and g.database in (None, "*")
-            and g.table_schema in (None, "*")
-            and g.table_name in (None, "*")
+            SqlOperation.CREATE in g.operations and not g.databases and not g.tables
             for g in self.grants
         )
 
@@ -203,7 +218,7 @@ class AccessControlService:
         if Role(user.role) == Role.ADMIN:
             return set()
         grants = await self._grants_for(user, connection_id)
-        return {g.database for g in grants if g.database and g.database != "*"}
+        return {db for g in grants for db in GrantSpec.from_model(g).databases}
 
     async def granted_connection_ids(self, user: User) -> set[uuid.UUID]:
         """Connection ids the user has any grant on (i.e. connections shared with them)."""
@@ -236,17 +251,25 @@ class AccessControlService:
         subject_id: str,
         connection_id: uuid.UUID,
         operations: list[str],
+        databases: list[str] | None = None,
+        tables: list[str] | None = None,
         database: str | None = None,
         table_schema: str | None = None,
         table_name: str | None = None,
     ) -> AccessGrant:
+        dbs = _normalize_scope(
+            databases if databases is not None else ([database] if database else [])
+        )
+        tbls = _normalize_scope(
+            tables if tables is not None else ([table_name] if table_name else [])
+        )
         grant = AccessGrant(
             subject_type=subject_type,
             subject_id=subject_id,
             connection_id=connection_id,
-            database=database or None,
+            databases=list(dbs) or None,
+            tables=list(tbls) or None,
             table_schema=table_schema or None,
-            table_name=table_name or None,
             operations=operations,
         )
         self._session.add(grant)
@@ -261,6 +284,8 @@ class AccessControlService:
         grant_id: uuid.UUID,
         *,
         operations: list[str] | None = None,
+        databases: list[str] | None = None,
+        tables: list[str] | None = None,
         database: str | None = None,
         table_schema: str | None = None,
         table_name: str | None = None,
@@ -271,11 +296,20 @@ class AccessControlService:
             raise NotFoundError("Access grant not found.")
         if operations is not None:
             grant.operations = operations
-        # When the form submits scope fields, blanks mean "any" (None).
+        # When the form submits scope fields, an empty selection means "any".
         if clear_scope:
-            grant.database = database or None
+            dbs = _normalize_scope(
+                databases if databases is not None else ([database] if database else [])
+            )
+            tbls = _normalize_scope(
+                tables if tables is not None else ([table_name] if table_name else [])
+            )
+            grant.databases = list(dbs) or None
+            grant.tables = list(tbls) or None
             grant.table_schema = table_schema or None
-            grant.table_name = table_name or None
+            # Clear legacy scalar columns; the JSON arrays are authoritative for new writes.
+            grant.database = None
+            grant.table_name = None
         await self._session.flush()
         return grant
 

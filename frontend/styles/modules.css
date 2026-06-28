@@ -410,3 +410,17 @@
 .ts-wrapper.focus .ts-control {
   border-color: var(--accent) !important;
 }
+/* Selected tags in multi-select: accent-tinted, readable. */
+.ts-wrapper.multi .ts-control > .item {
+  background: var(--accent-soft) !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--accent) !important;
+  border-radius: var(--radius-sm);
+}
+.ts-wrapper.multi .ts-control > .item .remove {
+  border-left-color: var(--accent) !important;
+  color: var(--text-primary) !important;
+}
+.ts-wrapper.disabled .ts-control {
+  opacity: 0.55;
+}

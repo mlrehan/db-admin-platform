@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import JSON, ForeignKey, String, UniqueConstraint, Uuid
+from sqlalchemy import JSON, ForeignKey, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin
@@ -24,17 +24,6 @@ from app.db.base import Base, TimestampMixin
 
 class AccessGrant(Base, TimestampMixin):
     __tablename__ = "access_grants"
-    __table_args__ = (
-        UniqueConstraint(
-            "subject_type",
-            "subject_id",
-            "connection_id",
-            "database",
-            "table_schema",
-            "table_name",
-            name="uq_access_grants_subject_scope",
-        ),
-    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
 
@@ -46,6 +35,11 @@ class AccessGrant(Base, TimestampMixin):
     connection_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(), ForeignKey("connections.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    # A grant can cover MULTIPLE databases and/or tables. ``databases``/``tables`` are JSON
+    # arrays (NULL/empty = "any"). The legacy scalar columns below are kept so pre-existing
+    # rows keep working; new rows use the JSON arrays. Multiple databases ⇒ tables is "any".
+    databases: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    tables: Mapped[list | None] = mapped_column(JSON, nullable=True)
     database: Mapped[str | None] = mapped_column(String(255), nullable=True)
     table_schema: Mapped[str | None] = mapped_column(String(255), nullable=True)
     table_name: Mapped[str | None] = mapped_column(String(255), nullable=True)

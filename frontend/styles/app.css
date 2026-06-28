@@ -446,8 +446,22 @@
   .modal {
     width: 94vw !important;
   }
+  /* On phones the editor view becomes one scrollable column (the app-main scrolls) instead of
+     squeezing everything into one screen — otherwise the result grid gets almost no height and
+     its rows are unreachable. */
+  .editor-layout {
+    height: auto;
+    min-height: 100%;
+  }
   .code-editor {
-    height: 38vh;
+    height: 32vh;
+  }
+  /* Give the results grid and messages real, scrollable height on mobile. */
+  .editor-layout .data-grid {
+    min-height: 55vh;
+  }
+  .editor-layout .messages-panel {
+    min-height: 45vh;
   }
   /* On phones the editor is a native textarea; 16px font stops iOS from zooming on focus.
      Two-class selector to outrank the base `.code-fallback` rule regardless of load order. */
