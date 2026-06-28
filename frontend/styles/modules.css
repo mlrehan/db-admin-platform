@@ -375,3 +375,38 @@
     opacity: 0;
   }
 }
+
+/* TomSelect (access-grant DB/table pickers) themed to match app inputs. Uses CSS variables so
+   it adapts to both the dark and light themes automatically. !important is needed because the
+   vendored tom-select.css is injected AFTER the app stylesheets and would otherwise win. */
+.ts-wrapper .ts-control,
+.ts-wrapper.single .ts-control,
+.ts-dropdown {
+  background: var(--bg-elevated) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-strong) !important;
+  border-radius: var(--radius-md);
+}
+.ts-control,
+.ts-control input,
+.ts-control .item,
+.ts-dropdown,
+.ts-dropdown .option {
+  color: var(--text-primary) !important;
+}
+.ts-control input::placeholder {
+  color: var(--text-muted) !important;
+}
+.ts-dropdown {
+  border: 1px solid var(--border-strong) !important;
+  box-shadow: var(--shadow-lg);
+}
+.ts-dropdown .option.active,
+.ts-dropdown .active,
+.ts-dropdown .option:hover {
+  background: var(--accent-soft) !important;
+  color: var(--text-primary) !important;
+}
+.ts-wrapper.focus .ts-control {
+  border-color: var(--accent) !important;
+}

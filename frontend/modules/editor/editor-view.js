@@ -22,6 +22,7 @@ export class EditorView extends HTMLElement {
           <session-bar></session-bar>
           <span class="spacer"></span>
           <button class="btn btn-ghost" id="open-file" title="Open a .sql or .txt file">📂 Open file</button>
+          <button class="btn btn-ghost" id="save-file" title="Download the editor contents as a .sql file">💾 Save .sql</button>
           <button class="btn btn-primary" id="run">▶ Run <span class="muted">⌘⏎</span></button>
           <input type="file" id="file-input" accept=".sql,.txt,text/plain" hidden />
         </div>
@@ -45,6 +46,7 @@ export class EditorView extends HTMLElement {
     this._runBtn.addEventListener("click", () => this._run());
     this.addEventListener("run", () => this._run());
     this.querySelector("#open-file").addEventListener("click", () => this._fileInput.click());
+    this.querySelector("#save-file").addEventListener("click", () => this._saveFile());
     this._fileInput.addEventListener("change", (e) => this._openFile(e.target.files[0]));
     this.querySelectorAll(".rtab").forEach((t) =>
       t.addEventListener("click", () => this._selectTab(t.dataset.rtab))
@@ -73,6 +75,26 @@ export class EditorView extends HTMLElement {
       // Allow re-selecting the same file again later.
       this._fileInput.value = "";
     }
+  }
+
+  _saveFile() {
+    const sql = this._editor.getValue();
+    if (!sql.trim()) {
+      bus.emit(Events.TOAST, { message: "Nothing to save — the editor is empty.", kind: "error" });
+      return;
+    }
+    // Build a timestamped filename and trigger a client-side download (no server round-trip).
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    const blob = new Blob([sql], { type: "application/sql;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `query-${stamp}.sql`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    bus.emit(Events.TOAST, { message: `Saved ${a.download}`, kind: "success" });
   }
 
   _selectTab(tab) {
@@ -140,6 +162,11 @@ export class EditorView extends HTMLElement {
         `<span class="badge cat-ddl">error</span> ` +
         `<span style="color:var(--danger)">✕ Statement ${stmts.indexOf(failed) + 1}: ${escapeHtml(failed.error || failed.error_code)}</span>`;
       this._selectTab("messages");
+      // A permission denial is the most actionable error — surface it as a toast too so the
+      // user clearly sees they're not allowed to run that kind of statement.
+      if (failed.error_code === "ACCESS_DENIED") {
+        bus.emit(Events.TOAST, { message: failed.error || "Not permitted", kind: "error" });
+      }
     } else {
       const rowInfo = lastRows ? ` · ${lastRows.row_count} rows` : "";
       this._status.innerHTML = `<span style="color:var(--success)">✓ ${okCount} statement${okCount === 1 ? "" : "s"} in ${ms} ms${rowInfo}</span>`;

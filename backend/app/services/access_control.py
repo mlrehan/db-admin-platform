@@ -147,12 +147,14 @@ class AccessPolicy:
                 schema = target.schema if target else None
                 table = target.name if target else None
                 if not any(g.covers(st.operation, database, schema, table) for g in self.grants):
+                    op = st.operation.value
+                    where = f" on table '{table}'" if table else ""
                     raise AuthorizationError(
-                        f"Access denied: not permitted to {st.operation.value} "
-                        f"{(table or 'this statement')}.",
+                        f"You don't have permission to run {op} statements{where}. "
+                        f"Ask an administrator to grant you {op} access on this database.",
                         code="ACCESS_DENIED",
                         details={
-                            "operation": st.operation.value,
+                            "operation": op,
                             "database": database,
                             "table": table,
                         },

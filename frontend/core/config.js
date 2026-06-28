@@ -17,6 +17,7 @@ export const config = {
   monacoBase: overrides.monacoBase || "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs",
   agGridBase: overrides.agGridBase || "https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.4",
   swalBase: overrides.swalBase || "https://cdn.jsdelivr.net/npm/sweetalert2@11",
+  tomSelectBase: overrides.tomSelectBase || "https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist",
 };
 
 // Resolve an absolute ws:// or wss:// URL for a given API path.

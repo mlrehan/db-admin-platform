@@ -1,4 +1,6 @@
 // Lightweight modal helper. Appends an overlay to <body>, traps Escape, returns a close fn.
+// The modal deliberately does NOT close on outside (backdrop) click — to avoid losing a
+// half-filled form by accident. Close with Esc or the ✕ button.
 
 export function openModal({ title, content, width = 460 }) {
   const overlay = document.createElement("div");
@@ -21,9 +23,7 @@ export function openModal({ title, content, width = 460 }) {
   function onKey(e) {
     if (e.key === "Escape") close();
   }
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) close();
-  });
+  // Intentionally no backdrop-click-to-close: only Esc or the ✕ button dismiss the modal.
   overlay.querySelector(".modal-close").addEventListener("click", close);
   document.addEventListener("keydown", onKey);
   return close;

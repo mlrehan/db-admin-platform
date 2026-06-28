@@ -5,9 +5,11 @@ import { app } from "../../core/context.js";
 import { bus, Events } from "../../core/events.js";
 import { openModal } from "../../components/modal.js";
 import { confirm } from "../../core/notify.js";
+import { loadTomSelect } from "../../core/tom-select.js";
 import { escapeHtml } from "../../components/view-helpers.js";
 
 const ROLES = ["admin", "dba", "developer", "viewer"];
+const AUDIT_PAGE_SIZE = 100; // rows fetched per infinite-scroll page in the audit log
 
 export class AdminView extends HTMLElement {
   connectedCallback() {
@@ -33,6 +35,7 @@ export class AdminView extends HTMLElement {
     this.querySelectorAll(".tab").forEach((t) =>
       t.classList.toggle("active", t.dataset.tab === tab)
     );
+    this._auditObserver?.disconnect(); // stop any infinite-scroll watcher from the audit tab
     if (tab === "users") this._renderUsers();
     else if (tab === "permissions") this._renderPermissions();
     else this._renderAudit();
@@ -91,6 +94,19 @@ export class AdminView extends HTMLElement {
     }
   }
 
+  // Turn a plain <select> into a searchable TomSelect (no-op if the lib didn't load — the
+  // native select keeps working). TomSelect dispatches a native "change" on the underlying
+  // select, so cascade listeners still fire.
+  _enhanceSelect(sel) {
+    if (!window.TomSelect) return;
+    // eslint-disable-next-line no-new
+    new window.TomSelect(sel, {
+      allowEmptyOption: true,
+      create: false,
+      maxOptions: 500,
+    });
+  }
+
   async _deleteGrant(id) {
     if (!(await confirm({ title: "Delete this grant?", confirmText: "Delete", danger: true })))
       return;
@@ -139,14 +155,10 @@ export class AdminView extends HTMLElement {
         </select></div>
       <div class="row">
         <div class="field" style="flex:1"><label>Database (blank = any)</label>
-          <input class="input" name="database" list="grant-db-list" autocomplete="off"
-            placeholder="Pick or type…" value="${escapeHtml(existing?.database ?? "")}">
-          <datalist id="grant-db-list"></datalist>
+          <select class="input" name="database"><option value="">(any database)</option></select>
           <span class="muted hint" data-hint="db" style="font-size:var(--fs-xs)"></span></div>
         <div class="field" style="flex:1"><label>Table (blank = any)</label>
-          <input class="input" name="table_name" list="grant-table-list" autocomplete="off"
-            placeholder="Pick or type…" value="${escapeHtml(existing?.table_name ?? "")}">
-          <datalist id="grant-table-list"></datalist>
+          <select class="input" name="table_name"><option value="">(any table)</option></select>
           <span class="muted hint" data-hint="table" style="font-size:var(--fs-xs)"></span></div>
       </div>
       <div class="field"><label>Operations</label>
@@ -166,70 +178,78 @@ export class AdminView extends HTMLElement {
       subjSel.innerHTML = subjOptions(typeSel.value);
     });
 
-    // Database/Table pickers: suggest the connection's real databases & tables (datalist), so
-    // the admin can't accidentally grant an empty/wrong database — while still being able to
-    // type any value by hand. If introspection fails, the inputs just behave as plain text.
+    // Database/Table pickers: cascaded, searchable selects (TomSelect) populated from the
+    // connection's REAL databases & tables, so an admin can't grant an empty/wrong database.
+    // Selecting a database filters the table list. Leaving either blank means "any". Degrades
+    // to a plain <select> if TomSelect can't load, and to its existing value if the connection
+    // can't be introspected.
     const connSel = form.querySelector('[name="connection_id"]');
-    const dbInput = form.querySelector('[name="database"]');
-    const tableInput = form.querySelector('[name="table_name"]');
-    const dbList = form.querySelector("#grant-db-list");
-    const tableList = form.querySelector("#grant-table-list");
+    const dbSel = form.querySelector('[name="database"]');
+    const tableSel = form.querySelector('[name="table_name"]');
     const dbHint = form.querySelector('[data-hint="db"]');
     const tableHint = form.querySelector('[data-hint="table"]');
-    const fillList = (el, values) => {
-      el.innerHTML = values.map((v) => `<option value="${escapeHtml(v)}"></option>`).join("");
+
+    // Rebuild a <select>'s options ("(any)" first), preserving the desired current value even
+    // if it isn't in the fetched list. Re-applies TomSelect if it's active.
+    const setOptions = (sel, anyLabel, values, current) => {
+      const opts = [...new Set(values)];
+      if (current && !opts.includes(current)) opts.unshift(current);
+      sel.tomselect?.destroy();
+      sel.innerHTML =
+        `<option value="">${anyLabel}</option>` +
+        opts.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
+      sel.value = current || "";
+      this._enhanceSelect(sel);
     };
 
-    const loadTables = async () => {
+    const loadTables = async (current = "") => {
       const connId = connSel.value;
       if (!connId) return;
       tableHint.textContent = "Loading tables…";
       try {
-        const res = await app.api.listConnectionTables(connId, dbInput.value || undefined);
+        const res = await app.api.listConnectionTables(connId, dbSel.value || undefined);
         const names = [...new Set((res.tables || []).map((t) => t.name))].sort();
-        fillList(tableList, names);
+        setOptions(tableSel, "(any table)", names, current);
         tableHint.textContent = names.length
-          ? `${names.length} table(s) — blank = any`
-          : "No tables found — blank = any";
+          ? `${names.length} table(s) — or leave as any`
+          : "No tables — leave as any";
       } catch {
-        fillList(tableList, []);
-        tableHint.textContent = ""; // silent fallback: input still works as free text
+        setOptions(tableSel, "(any table)", current ? [current] : [], current);
+        tableHint.textContent = "Couldn't list tables — leave as any";
       }
     };
 
-    const loadDatabases = async () => {
+    const loadDatabases = async (curDb = "", curTable = "") => {
       const connId = connSel.value;
       if (!connId) return;
       dbHint.textContent = "Loading databases…";
       try {
         const res = await app.api.listConnectionDatabases(connId);
         const names = (res.databases || []).slice().sort();
-        fillList(dbList, names);
+        setOptions(dbSel, "(any database)", names, curDb);
         dbHint.textContent = names.length
-          ? `${names.length} database(s) — blank = any`
-          : "No databases found — blank = any";
+          ? `${names.length} database(s) — or leave as any`
+          : "No databases — leave as any";
       } catch {
-        fillList(dbList, []);
-        dbHint.textContent = "";
+        setOptions(dbSel, "(any database)", curDb ? [curDb] : [], curDb);
+        dbHint.textContent = "Couldn't list databases — leave as any";
       }
-      await loadTables();
+      await loadTables(curTable);
     };
 
-    // Reload tables when the chosen database changes; reload everything if the connection does.
-    dbInput.addEventListener("change", () => loadTables());
-    connSel.addEventListener("change", () => {
-      dbInput.value = "";
-      tableInput.value = "";
-      loadDatabases();
-    });
+    // Cascade: a new database reloads the table list; a new connection reloads both.
+    dbSel.addEventListener("change", () => loadTables());
+    connSel.addEventListener("change", () => loadDatabases());
 
     const close = openModal({
       title: existing ? "Edit access grant" : "New access grant",
       content: form,
       width: 480,
     });
-    // Populate suggestions once the modal is open (non-blocking).
-    loadDatabases();
+    // Load TomSelect (non-blocking), then populate, preselecting the grant's current scope.
+    loadTomSelect().finally(() =>
+      loadDatabases(existing?.database ?? "", existing?.table_name ?? "")
+    );
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const ops = [...form.querySelectorAll(".op-check input:checked")].map((c) => c.value);
@@ -392,27 +412,85 @@ export class AdminView extends HTMLElement {
     this._loadAudit();
   }
 
-  async _loadAudit() {
+  _auditFilters() {
     const filters = {};
     const cat = this.querySelector("#f-cat").value;
     if (cat) filters.category = cat;
     if (this.querySelector("#f-dest").checked) filters.destructive = true;
     if (this.querySelector("#f-fail").checked) filters.success = false;
+    return filters;
+  }
+
+  // Initial (or filter-changed) load: reset paging and render the first page, then watch a
+  // sentinel at the bottom to lazily fetch more (infinite scroll).
+  async _loadAudit() {
+    this._auditObserver?.disconnect();
+    this._auditOffset = 0;
+    this._auditDone = false;
+    this._auditLoading = false;
     const box = this.querySelector("#auditrows");
+    box.innerHTML = `<div class="placeholder">Loading…</div>`;
+    let logs;
     try {
-      const logs = await app.api.listAuditLogs({ ...filters, limit: 200 });
-      if (!logs.length) {
-        box.innerHTML = `<div class="placeholder muted">No audit entries.</div>`;
-        return;
-      }
-      box.innerHTML = `
-        <table class="grid-table">
-          <thead><tr><th>Time</th><th>User</th><th>Engine</th><th>Cat</th>
-            <th>Statement</th><th>Result</th><th>ms</th></tr></thead>
-          <tbody>${logs.map((l) => this._auditRow(l)).join("")}</tbody>
-        </table>`;
+      logs = await app.api.listAuditLogs({
+        ...this._auditFilters(),
+        limit: AUDIT_PAGE_SIZE,
+        offset: 0,
+      });
     } catch (err) {
       box.innerHTML = `<div class="placeholder">${escapeHtml(err.message)}</div>`;
+      return;
+    }
+    if (!logs.length) {
+      box.innerHTML = `<div class="placeholder muted">No audit entries.</div>`;
+      return;
+    }
+    box.innerHTML = `
+      <table class="grid-table">
+        <thead><tr><th>Time</th><th>User</th><th>Engine</th><th>Cat</th>
+          <th>Statement</th><th>Result</th><th>ms</th></tr></thead>
+        <tbody id="auditbody">${logs.map((l) => this._auditRow(l)).join("")}</tbody>
+      </table>
+      <div id="audit-sentinel" class="muted" style="padding:12px; text-align:center"></div>`;
+    this._auditOffset = logs.length;
+    if (logs.length < AUDIT_PAGE_SIZE) {
+      this._auditDone = true;
+      this.querySelector("#audit-sentinel").textContent = "— end of log —";
+      return;
+    }
+    // Auto-load the next page when the sentinel scrolls into view.
+    const sentinel = this.querySelector("#audit-sentinel");
+    this._auditObserver = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) this._loadMoreAudit();
+    });
+    this._auditObserver.observe(sentinel);
+  }
+
+  async _loadMoreAudit() {
+    if (this._auditLoading || this._auditDone) return;
+    this._auditLoading = true;
+    const sentinel = this.querySelector("#audit-sentinel");
+    const body = this.querySelector("#auditbody");
+    if (sentinel) sentinel.textContent = "Loading more…";
+    try {
+      const logs = await app.api.listAuditLogs({
+        ...this._auditFilters(),
+        limit: AUDIT_PAGE_SIZE,
+        offset: this._auditOffset,
+      });
+      if (body && logs.length) body.insertAdjacentHTML("beforeend", logs.map((l) => this._auditRow(l)).join(""));
+      this._auditOffset += logs.length;
+      if (logs.length < AUDIT_PAGE_SIZE) {
+        this._auditDone = true;
+        this._auditObserver?.disconnect();
+        if (sentinel) sentinel.textContent = "— end of log —";
+      } else if (sentinel) {
+        sentinel.textContent = "";
+      }
+    } catch (err) {
+      if (sentinel) sentinel.textContent = err.message;
+    } finally {
+      this._auditLoading = false;
     }
   }
 

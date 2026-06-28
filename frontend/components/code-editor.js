@@ -1,10 +1,20 @@
-// SQL code editor. Uses Monaco when it loads from CDN; otherwise falls back to a styled
-// monospace textarea (fully functional). Exposes getValue()/setValue()/focus(). Phase 9 will
-// vendor Monaco locally to remove the CDN dependency.
+// SQL code editor. Uses Monaco on desktop; on phones/touch screens it uses a native
+// <textarea> instead, because Monaco's hidden-input editing misbehaves with mobile virtual
+// keyboards (e.g. Backspace not deleting). The textarea is fully functional everywhere and is
+// also the fallback if Monaco fails to load. Exposes getValue()/setValue()/focus().
 
 import { config } from "../core/config.js";
 
 const MONACO_BASE = config.monacoBase;
+
+// Monaco is unreliable with mobile virtual keyboards, so use the native textarea on small or
+// touch-primary screens. Checked once at mount.
+function prefersPlainTextarea() {
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  const smallScreen = window.matchMedia("(max-width: 760px)").matches;
+  const coarsePointer = window.matchMedia("(pointer: coarse)").matches;
+  return smallScreen || (coarsePointer && window.matchMedia("(max-width: 1024px)").matches);
+}
 
 function loadMonaco() {
   if (window.__monacoPromise) return window.__monacoPromise;
@@ -46,7 +56,13 @@ export class CodeEditor extends HTMLElement {
       }
     });
 
-    this._tryMonaco();
+    // On phones/touch screens, keep the native textarea (mobile-friendly); skip Monaco.
+    if (prefersPlainTextarea()) {
+      this.classList.add("plain-mode");
+      this._textarea.focus();
+    } else {
+      this._tryMonaco();
+    }
   }
 
   async _tryMonaco() {

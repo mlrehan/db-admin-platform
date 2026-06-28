@@ -6,4 +6,5 @@ window.__APP_CONFIG__ = {
   monacoBase: "/vendor/monaco/min/vs",
   agGridBase: "/vendor/ag-grid",
   swalBase: "/vendor/sweetalert2",
+  tomSelectBase: "/vendor/tom-select/dist",
 };

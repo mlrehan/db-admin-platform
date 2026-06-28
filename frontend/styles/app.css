@@ -449,6 +449,12 @@
   .code-editor {
     height: 38vh;
   }
+  /* On phones the editor is a native textarea; 16px font stops iOS from zooming on focus.
+     Two-class selector to outrank the base `.code-fallback` rule regardless of load order. */
+  .code-editor .code-fallback {
+    font-size: 16px;
+    line-height: 1.5;
+  }
   /* Toolbars stack their controls full-width for easy tapping. */
   .editor-toolbar,
   .viewer-controls {
