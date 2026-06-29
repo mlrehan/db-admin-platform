@@ -129,6 +129,12 @@ export class CodeEditor extends HTMLElement {
   focus() {
     (this._monaco || this._textarea)?.focus();
   }
+
+  // Recalculate Monaco's layout after its container is resized (e.g. the editor/results split
+  // divider was dragged). No-op for the textarea fallback, which reflows automatically.
+  layout() {
+    this._monaco?.layout();
+  }
 }
 
 customElements.define("code-editor", CodeEditor);

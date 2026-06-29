@@ -35,6 +35,8 @@ from app.db.adapters.base import (
     QueryBatch,
     QueryColumn,
     QueryResult,
+    ScriptResultSet,
+    ScriptRun,
 )
 from app.db.adapters.metadata import (
     ColumnInfo,
@@ -347,6 +349,81 @@ class SQLAlchemyAdapter(DatabaseAdapter):
             async with conn.begin():
                 result = await conn.execute(text(statement), dict(parameters or {}))
                 return self._result_from(result, start, max_rows)
+
+    # --- whole-script (single session) execution -----------------------------------------
+    #
+    # A multi-statement script must run on ONE connection so temporary tables, session
+    # variables and procedural blocks share scope, and ALL result sets are returned. Two
+    # strategies, chosen per engine:
+    #   • "sequential" (PostgreSQL/MySQL): run each statement on the same connection. Temp
+    #     tables and @session variables are connection-scoped, so this preserves them.
+    #   • "batch" (SQL Server): send the WHOLE script in one driver call and walk nextset() —
+    #     required because T-SQL variables / table variables / cursors are *batch*-scoped.
+    script_mode: ClassVar[str] = "sequential"
+
+    async def run_script(self, sql: str, *, max_rows: int = 1000) -> ScriptRun:
+        start = time.perf_counter()
+        if self.script_mode == "batch":
+            result_sets, messages = await self._run_script_batch(sql, max_rows)
+        else:
+            result_sets, messages = await self._run_script_sequential(sql, max_rows)
+        elapsed = (time.perf_counter() - start) * 1000
+        return ScriptRun(result_sets=result_sets, messages=messages, execution_ms=round(elapsed, 3))
+
+    async def _run_script_sequential(
+        self, sql: str, max_rows: int
+    ) -> tuple[list[ScriptResultSet], list[str]]:
+        from app.services.sql_guard import split_sql_statements  # local: avoid layering cycle
+
+        result_sets: list[ScriptResultSet] = []
+        messages: list[str] = []
+        async with self.acquire() as conn:
+            # AUTOCOMMIT so each statement commits on the shared connection (temp tables created
+            # this way persist for the connection's lifetime, just like a real session).
+            run = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            for stmt in split_sql_statements(sql, self.engine):
+                result = await run.exec_driver_sql(stmt)
+                if result.returns_rows:
+                    fetched = result.fetchmany(max_rows + 1)
+                    truncated = len(fetched) > max_rows
+                    rows = [tuple(r) for r in fetched[:max_rows]]
+                    columns = [QueryColumn(name=str(k)) for k in result.keys()]
+                    result_sets.append(ScriptResultSet(columns, rows, truncated))
+                else:
+                    affected = self._rows_affected(result.rowcount)
+                    if affected is not None:
+                        messages.append(f"{affected} row(s) affected")
+        return result_sets, messages
+
+    async def _run_script_batch(
+        self, sql: str, max_rows: int
+    ) -> tuple[list[ScriptResultSet], list[str]]:
+        """Send the whole script as one batch and collect every result set via the driver's
+        native ``nextset()`` (SQL Server / MySQL async DBAPI cursors support this)."""
+        result_sets: list[ScriptResultSet] = []
+        messages: list[str] = []
+        async with self.acquire() as conn:
+            autoconn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            raw = await autoconn.get_raw_connection()
+            cursor = await raw.driver_connection.cursor()
+            try:
+                await cursor.execute(sql)
+                while True:
+                    if cursor.description:
+                        columns = [QueryColumn(name=str(d[0])) for d in cursor.description]
+                        fetched = await cursor.fetchmany(max_rows + 1)
+                        truncated = len(fetched) > max_rows
+                        rows = [tuple(r) for r in fetched[:max_rows]]
+                        result_sets.append(ScriptResultSet(columns, rows, truncated))
+                    else:
+                        affected = self._rows_affected(getattr(cursor, "rowcount", -1))
+                        if affected is not None:
+                            messages.append(f"{affected} row(s) affected")
+                    if not await cursor.nextset():
+                        break
+            finally:
+                await cursor.close()
+        return result_sets, messages
 
     async def stream(
         self,

@@ -43,6 +43,8 @@ export class DataGrid extends HTMLElement {
     this._rows = [];
     this._page = 0;
     this._sort = { index: null, dir: "asc" };
+    // "Wrap text" preference (sticky across result sets / reloads).
+    this._wrap = localStorage.getItem("dbadmin.grid-wrap") === "1";
     this.innerHTML = `<div class="grid-empty muted">No results yet.</div>`;
   }
 
@@ -144,13 +146,15 @@ export class DataGrid extends HTMLElement {
 
     this.innerHTML = `
       <div class="grid-scroll">
-        <table class="grid-table">
+        <table class="grid-table${this._wrap ? " wrap" : ""}">
           <thead><tr>${head || "<th></th>"}</tr></thead>
           <tbody>${body || `<tr><td class="muted">No rows</td></tr>`}</tbody>
         </table>
       </div>
       <div class="grid-footer">
         <span class="muted">${total} row${total === 1 ? "" : "s"}</span>
+        <button class="btn btn-ghost" data-wrap title="Wrap long cell text"
+          style="margin-left:8px">${this._wrap ? "↩ Wrap: on" : "↩ Wrap: off"}</button>
         <span class="spacer"></span>
         <button class="btn btn-ghost" data-nav="prev" ${this._page === 0 ? "disabled" : ""}>‹</button>
         <span class="muted">Page ${this._page + 1} / ${pages}</span>
@@ -158,6 +162,11 @@ export class DataGrid extends HTMLElement {
           this._page >= pages - 1 ? "disabled" : ""
         }>›</button>
       </div>`;
+    this.querySelector("[data-wrap]")?.addEventListener("click", () => {
+      this._wrap = !this._wrap;
+      localStorage.setItem("dbadmin.grid-wrap", this._wrap ? "1" : "0");
+      this._renderFallback();
+    });
 
     this.querySelectorAll("th[data-i]").forEach((th) =>
       th.querySelector(".th-label").addEventListener("click", () =>

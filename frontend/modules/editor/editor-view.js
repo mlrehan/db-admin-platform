@@ -17,6 +17,8 @@ const MAX_SQL_FILE_BYTES = 8 * 1024 * 1024; // 8 MB
 // The current editor text is persisted here so an unsaved query survives navigation and page
 // reloads (restored when the user returns to the editor).
 const DRAFT_KEY = "dbadmin.sql-draft";
+// Persisted height (px) of the Monaco editor pane above the editor/results divider.
+const SPLIT_KEY = "dbadmin.editor-split";
 
 export class EditorView extends HTMLElement {
   connectedCallback() {
@@ -31,6 +33,8 @@ export class EditorView extends HTMLElement {
           <input type="file" id="file-input" accept=".sql,.txt,text/plain" hidden />
         </div>
         <code-editor value="SELECT 1;"></code-editor>
+        <div class="editor-divider" id="divider" title="Drag to resize editor / results"
+             role="separator" aria-orientation="horizontal" tabindex="0"></div>
         <div class="result-status" id="status"><span class="muted">Ready.</span></div>
         <div class="result-tabs">
           <button class="rtab active" data-rtab="results">Results</button>
@@ -65,6 +69,75 @@ export class EditorView extends HTMLElement {
     this.querySelectorAll(".rtab").forEach((t) =>
       t.addEventListener("click", () => this._selectTab(t.dataset.rtab))
     );
+    this._initDivider();
+  }
+
+  // Draggable divider between the editor and the results/messages section. Persists the split
+  // so it survives reloads; calls Monaco's layout() and lets the grid reflow (flex) after a drag.
+  _initDivider() {
+    const divider = this.querySelector("#divider");
+    const layout = this.querySelector(".editor-layout");
+    const MIN_EDITOR = 90;
+    const MIN_RESULTS = 140;
+
+    const applyHeight = (px) => {
+      const max = layout.clientHeight - MIN_RESULTS;
+      const h = Math.max(MIN_EDITOR, Math.min(px, max));
+      this._editor.style.height = `${h}px`;
+      this._editor.style.flex = "none";
+      this._editor.layout?.();
+    };
+    // Restore a saved split.
+    try {
+      const saved = Number(localStorage.getItem(SPLIT_KEY));
+      if (Number.isFinite(saved) && saved > 0) applyHeight(saved);
+    } catch {
+      /* ignore */
+    }
+
+    const startDrag = (clientY) => {
+      const startTop = this._editor.getBoundingClientRect().top;
+      const move = (y) => applyHeight(y - startTop);
+      const onMouseMove = (e) => move(e.clientY);
+      const onTouchMove = (e) => e.touches[0] && move(e.touches[0].clientY);
+      const stop = () => {
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", stop);
+        document.removeEventListener("touchmove", onTouchMove);
+        document.removeEventListener("touchend", stop);
+        document.body.style.userSelect = "";
+        try {
+          localStorage.setItem(SPLIT_KEY, String(this._editor.clientHeight));
+        } catch {
+          /* ignore */
+        }
+      };
+      document.body.style.userSelect = "none";
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", stop);
+      document.addEventListener("touchmove", onTouchMove, { passive: true });
+      document.addEventListener("touchend", stop);
+    };
+    divider.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      startDrag(e.clientY);
+    });
+    divider.addEventListener("touchstart", (e) => e.touches[0] && startDrag(e.touches[0].clientY), {
+      passive: true,
+    });
+    // Keyboard accessibility: arrow keys nudge the split.
+    divider.addEventListener("keydown", (e) => {
+      const step = e.key === "ArrowUp" ? -24 : e.key === "ArrowDown" ? 24 : 0;
+      if (step) {
+        e.preventDefault();
+        applyHeight(this._editor.clientHeight + step);
+        try {
+          localStorage.setItem(SPLIT_KEY, String(this._editor.clientHeight));
+        } catch {
+          /* ignore */
+        }
+      }
+    });
   }
 
   disconnectedCallback() {

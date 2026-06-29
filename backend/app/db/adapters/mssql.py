@@ -49,6 +49,9 @@ class MSSQLAdapter(SQLAlchemyAdapter):
     server_version_sql = "SELECT @@VERSION"
     # "master" is the system database used for server-level connections.
     system_database = "master"
+    # T-SQL variables / table variables / cursors are batch-scoped, so a whole script must be
+    # sent as ONE batch; results come back via the driver's native nextset().
+    script_mode = "batch"
     databases_sql = "SELECT name FROM sys.databases"
     hidden_databases = frozenset({"master", "tempdb", "model", "msdb"})
     # SQL Server system schemas + the fixed database-role schemas (no user objects).

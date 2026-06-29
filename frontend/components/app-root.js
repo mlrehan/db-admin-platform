@@ -18,6 +18,7 @@ const NAV = [
   { path: "/editor", icon: "editor", label: "SQL Editor", view: "editor-view" },
   { path: "/schema", icon: "schema", label: "Schema Explorer", view: "schema-view" },
   { path: "/data", icon: "table", label: "Data Viewer", view: "viewer-view" },
+  { path: "/diagram", icon: "diagram", label: "Diagram", view: "diagram-view" },
   { path: "/activity", icon: "activity", label: "Activity", view: "activity-view" },
   { path: "/admin", icon: "shield", label: "Admin", view: "admin-view", roles: ["admin"] },
 ];

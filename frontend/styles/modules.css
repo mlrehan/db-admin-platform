@@ -51,6 +51,15 @@
 .grid-table tbody tr:hover {
   background: var(--bg-hover);
 }
+/* Wrap mode: show full cell content, letting row height grow instead of truncating. */
+.grid-table.wrap tbody td {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-word;
+  max-width: 360px;
+  vertical-align: top;
+}
 .grid-table .null {
   color: var(--text-muted);
   font-style: italic;
@@ -154,6 +163,30 @@
   display: block;
   height: 240px;
   border-bottom: 1px solid var(--border);
+}
+/* Draggable split between the editor and the results/messages section. */
+.editor-divider {
+  flex: none;
+  height: 7px;
+  cursor: row-resize;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+.editor-divider::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 38px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+.editor-divider:hover::after,
+.editor-divider:focus-visible::after {
+  background: var(--accent);
 }
 .code-fallback {
   width: 100%;
@@ -444,3 +477,58 @@
 .ts-wrapper.disabled .ts-control {
   opacity: 0.55;
 }
+
+/* Database diagram (ER) */
+.erd-layout { display: flex; flex-direction: column; height: 100%; }
+.erd-toolbar { flex-wrap: wrap; gap: var(--sp-2); }
+.erd-tables { min-width: 220px; }
+.erd-stage {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+  background:
+    linear-gradient(var(--border) 1px, transparent 1px) 0 0 / 22px 22px,
+    linear-gradient(90deg, var(--border) 1px, transparent 1px) 0 0 / 22px 22px,
+    var(--bg-base);
+  cursor: grab;
+}
+.erd-stage.panning { cursor: grabbing; }
+.erd-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+.erd-links { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+.erd-link { stroke: var(--accent); stroke-width: 1.5; opacity: 0.8; }
+.erd-one { fill: var(--accent); }
+.erd-many { fill: var(--bg-base); stroke: var(--accent); stroke-width: 1.5; }
+.erd-hint { position: absolute; top: 16px; left: 16px; }
+.erd-box {
+  position: absolute;
+  width: 210px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--fs-xs);
+  user-select: none;
+}
+.erd-box-head {
+  padding: 6px var(--sp-2);
+  font-weight: 700;
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  cursor: move;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.erd-box-body { max-height: 320px; overflow: auto; }
+.erd-col {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 3px var(--sp-2);
+  border-top: 1px solid var(--border);
+}
+.erd-col-name { display: flex; align-items: center; gap: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.erd-col-type { color: var(--text-muted); font-family: var(--font-mono); white-space: nowrap; }
+.erd-pk { font-size: 10px; }
+.erd-fk { font-size: 9px; font-weight: 700; color: var(--accent); }

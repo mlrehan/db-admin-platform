@@ -21,6 +21,7 @@ from enum import Enum
 
 from app.auth.roles import Permission, Role, role_has_permission
 from app.core.exceptions import AuthorizationError, ValidationError
+from app.db.engines import EngineType
 from app.models.user import User
 
 
@@ -128,12 +129,14 @@ def _strip_literals_and_comments(sql: str) -> str:
     return "".join(out)
 
 
-def split_sql_statements(sql: str) -> list[str]:
+def split_sql_statements(sql: str, engine: EngineType | None = None) -> list[str]:
     """Split a batch into individual statements on top-level ``;`` preserving original text.
 
-    Comment/literal-aware (so semicolons inside strings or comments don't split). Used by the
-    SQL editor's script runner to execute each statement separately.
+    Comment/literal-aware (so semicolons inside strings or comments don't split). ``#`` is a
+    line comment **only in MySQL** — in SQL Server it prefixes temp tables (``#temp``) and in
+    PostgreSQL it isn't a comment, so it must not be stripped there.
     """
+    hash_comment = engine == EngineType.MYSQL
     statements: list[str] = []
     start = 0
     i, n = 0, len(sql)
@@ -146,7 +149,7 @@ def split_sql_statements(sql: str) -> list[str]:
     while i < n:
         ch = sql[i]
         two = sql[i : i + 2]
-        if two == "--" or ch == "#":
+        if two == "--" or (ch == "#" and hash_comment):
             j = sql.find("\n", i)
             i = n if j == -1 else j
             continue

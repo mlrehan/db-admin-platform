@@ -99,6 +99,25 @@ class QueryBatch:
     returns_rows: bool = True
 
 
+@dataclass(frozen=True)
+class ScriptResultSet:
+    """One result set produced by a multi-statement script run."""
+
+    columns: list[QueryColumn]
+    rows: list[tuple[Any, ...]]
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class ScriptRun:
+    """Outcome of running a whole script as one session: every result set, plus row-count
+    messages from non-returning statements (INSERT/UPDATE/DDL/…)."""
+
+    result_sets: list[ScriptResultSet]
+    messages: list[str]
+    execution_ms: float
+
+
 class DatabaseAdapter(ABC):
     """Lifecycle contract for a connection to a single target database.
 

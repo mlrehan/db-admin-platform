@@ -40,6 +40,10 @@ const ROUTES = [
     load: () => import("./modules/viewer/viewer-view.js"),
   },
   {
+    path: "/diagram", view: "diagram-view", requiresAuth: true,
+    load: () => import("./modules/diagram/diagram-view.js"),
+  },
+  {
     path: "/activity", view: "activity-view", requiresAuth: true,
     load: () => import("./modules/activity/activity-view.js"),
   },

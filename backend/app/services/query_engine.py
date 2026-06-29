@@ -38,7 +38,7 @@ from app.models.user import User
 from app.services.access_control import AccessPolicy
 from app.services.audit_sink import AuditSink, QueryAuditEvent
 from app.services.orchestrator import LiveSession
-from app.services.sql_guard import SqlAnalysis, SqlGuard, split_sql_statements
+from app.services.sql_guard import SqlAnalysis, SqlGuard
 from app.utils.serialization import row_to_list
 
 logger = get_logger(__name__)
@@ -126,6 +126,22 @@ class QueryEngine:
         else:
             self._guard.enforce(user, analysis)
 
+    def _enforce_script(
+        self,
+        user: User,
+        sql: str,
+        analysis: SqlAnalysis,
+        session: LiveSession,
+        policy: AccessPolicy | None,
+    ) -> None:
+        """Authorize a whole multi-statement script. With a policy (all user paths) the
+        script-aware analyzer governs (temp tables/variables need no grant, dynamic SQL is
+        validated); otherwise the coarse role check applies."""
+        if policy is not None:
+            policy.enforce_script(session.adapter.engine, session.adapter.active_database, sql)
+        else:
+            self._guard.enforce(user, analysis)
+
     # --- buffered execution --------------------------------------------------------------
 
     async def execute(
@@ -203,63 +219,82 @@ class QueryEngine:
         max_rows: int | None = None,
         policy: AccessPolicy | None = None,
     ) -> ScriptResult:
-        """Run a batch of statements sequentially (SSMS/DataGrip-style script execution).
+        """Run a whole multi-statement script in ONE database session (SSMS/DataGrip style).
 
-        Each statement is independently role- and access-checked, executed and audited.
-        Execution stops at the first failing statement; the outcomes gathered so far are
-        returned so the editor can show a per-statement messages log.
+        The entire script runs on a single connection so temp tables, session/batch variables,
+        cursors and procedural blocks keep their scope, and **every** result set is returned.
+        Access control authorizes the script as a unit (temp tables/variables need no grant;
+        read-only dynamic SQL is validated). The whole run is audited as one event.
         """
-        statements = split_sql_statements(sql)
-        if not statements:
+        if not sql or not sql.strip():
             raise ValidationError("No SQL statement to execute.")
         capped = self._cap_rows(max_rows)
-        outcomes: list[StatementOutcome] = []
-        overall_ok = True
+        analysis = self._guard.analyze(sql)  # category/destructive for audit
+        started = QueryAuditEvent.now()
 
         async with session.lock:
-            for stmt in statements:
-                session.touch()
-                started = QueryAuditEvent.now()
-                analysis = self._guard.analyze(stmt)
-                try:
-                    self._enforce(user, stmt, analysis, session, policy)
-                    result = await asyncio.wait_for(
-                        session.adapter.execute(stmt, parameters, max_rows=capped),
-                        self._settings.statement_timeout_seconds,
-                    )
-                except (TimeoutError, AppError, Exception) as exc:  # noqa: BLE001
-                    code, message = self._classify_error(exc)
-                    await self._audit_event(
-                        user, session, analysis, started, success=False,
-                        error_code=code, error=message,
-                    )
-                    outcomes.append(
+            session.touch()
+            try:
+                self._enforce_script(user, sql, analysis, session, policy)
+                run = await asyncio.wait_for(
+                    session.adapter.run_script(sql, max_rows=capped),
+                    self._settings.statement_timeout_seconds,
+                )
+            except (TimeoutError, AppError, Exception) as exc:  # noqa: BLE001
+                code, message = self._classify_error(exc)
+                await self._audit_event(
+                    user, session, analysis, started, success=False,
+                    error_code=code, error=message,
+                )
+                return ScriptResult(
+                    statements=[
                         StatementOutcome(
-                            sql=stmt, success=False, returns_rows=False, columns=[], rows=[],
+                            sql=sql, success=False, returns_rows=False, columns=[], rows=[],
                             row_count=0, rows_affected=None, execution_ms=0.0, truncated=False,
                             category=analysis.category.value, destructive=analysis.destructive,
                             error_code=code, error=message,
                         )
-                    )
-                    overall_ok = False
-                    break
-
-                await self._audit_event(
-                    user, session, analysis, started, success=True,
-                    row_count=result.row_count, rows_affected=result.rows_affected,
-                )
-                outcomes.append(
-                    StatementOutcome(
-                        sql=stmt, success=True, returns_rows=result.returns_rows,
-                        columns=result.columns, rows=[row_to_list(r) for r in result.rows],
-                        row_count=result.row_count, rows_affected=result.rows_affected,
-                        execution_ms=result.execution_ms, truncated=result.truncated,
-                        category=analysis.category.value, destructive=analysis.destructive,
-                        error_code=None, error=None,
-                    )
+                    ],
+                    success=False,
                 )
 
-        return ScriptResult(statements=outcomes, success=overall_ok)
+        total_rows = sum(len(rs.rows) for rs in run.result_sets)
+        await self._audit_event(
+            user, session, analysis, started, success=True, row_count=total_rows,
+        )
+
+        # Map each result set to a row-returning outcome and each row-count to a message
+        # outcome, so the editor shows the final result set plus all others and messages.
+        outcomes: list[StatementOutcome] = []
+        for rs in run.result_sets:
+            outcomes.append(
+                StatementOutcome(
+                    sql=sql, success=True, returns_rows=True, columns=rs.columns,
+                    rows=[row_to_list(r) for r in rs.rows], row_count=len(rs.rows),
+                    rows_affected=None, execution_ms=run.execution_ms, truncated=rs.truncated,
+                    category=analysis.category.value, destructive=analysis.destructive,
+                    error_code=None, error=None,
+                )
+            )
+        for msg in run.messages:
+            outcomes.append(
+                StatementOutcome(
+                    sql=msg, success=True, returns_rows=False, columns=[], rows=[],
+                    row_count=0, rows_affected=None, execution_ms=0.0, truncated=False,
+                    category=analysis.category.value, destructive=analysis.destructive,
+                    error_code=None, error=None,
+                )
+            )
+        if not outcomes:  # script ran but produced no rows and no row-count (e.g. pure DDL)
+            outcomes.append(
+                StatementOutcome(
+                    sql=sql, success=True, returns_rows=False, columns=[], rows=[],
+                    row_count=0, rows_affected=None, execution_ms=run.execution_ms,
+                    truncated=False, category=analysis.category.value,
+                    destructive=analysis.destructive, error_code=None, error=None,
+                )
+            )
+        return ScriptResult(statements=outcomes, success=True)
 
     @staticmethod
     def _classify_error(exc: Exception) -> tuple[str, str]:

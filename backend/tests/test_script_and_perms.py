@@ -107,7 +107,11 @@ async def test_grant_is_authoritative_over_role(client: AsyncClient, seed_users,
 # --- script execution --------------------------------------------------------------------
 
 
-async def test_script_runs_multiple_statements(client: AsyncClient, seed_users, fake_pg) -> None:
+async def test_script_runs_in_one_session_returns_all_sets(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    # The whole script runs in one session; every result set is returned plus row-count
+    # messages from non-returning statements.
     admin = await _login(client, "admin@test.com", "admin-password-123")
     _, sid = await _admin_session(client, admin, row_count=2)
     resp = await client.post(
@@ -117,15 +121,17 @@ async def test_script_runs_multiple_statements(client: AsyncClient, seed_users, 
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["success"] is True
+    # One row-returning result set (the SELECT, 2 rows) + two row-count messages.
+    row_sets = [s for s in body["statements"] if s["returns_rows"]]
+    assert len(row_sets) == 1 and row_sets[0]["row_count"] == 2
     assert len(body["statements"]) == 3
-    # The SELECT statement carries rows; the others report affected counts.
-    select_stmt = body["statements"][1]
-    assert select_stmt["returns_rows"] is True
-    assert select_stmt["row_count"] == 2
 
 
-async def test_script_stops_on_error(client: AsyncClient, seed_users, fake_pg) -> None:
-    # A user granted only SELECT: the script halts at the first non-granted statement.
+async def test_script_denied_as_a_unit_before_execution(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    # A user granted only SELECT: a script that also DELETEs is rejected as a unit *before*
+    # anything runs (no partial execution of the non-granted statement).
     admin = await _login(client, "admin@test.com", "admin-password-123")
     user, _, sid = await _granted_user(client, admin, "viewer", ["SELECT"])
     resp = await client.post(
@@ -135,7 +141,25 @@ async def test_script_stops_on_error(client: AsyncClient, seed_users, fake_pg) -
     assert resp.status_code == 200
     body = resp.json()
     assert body["success"] is False
-    assert body["statements"][0]["success"] is True            # SELECT ran
-    assert body["statements"][1]["success"] is False           # DELETE not granted
-    assert body["statements"][1]["error_code"] == "ACCESS_DENIED"
-    assert len(body["statements"]) == 2                         # stopped; SELECT 2 never ran
+    assert body["statements"][0]["error_code"] == "ACCESS_DENIED"
+    assert "DELETE" in body["statements"][0]["error"]
+
+
+async def test_temp_table_read_script_allowed_with_select(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    # A read-only script that builds temp tables from granted source tables is allowed for a
+    # SELECT-only user — temp tables need no grant.
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    user, _, sid = await _granted_user(client, admin, "viewer", ["SELECT"])
+    script = (
+        "SELECT id INTO #a FROM users; "
+        "SELECT id INTO #b FROM orders; "
+        "SELECT * FROM #a JOIN #b ON #a.id = #b.id; "
+        "DROP TABLE #a; DROP TABLE #b;"
+    )
+    resp = await client.post(
+        f"/api/v1/sessions/{sid}/script", headers=user, json={"sql": script}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True

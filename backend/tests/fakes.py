@@ -112,6 +112,29 @@ class FakeAdapter(DatabaseAdapter):
     def _synth_rows(self, n: int) -> list[tuple[Any, ...]]:
         return [(i, f"row-{i}") for i in range(n)]
 
+    async def run_script(self, sql: str, *, max_rows: int = 1000):
+        """Single-session script run: one result set per row-returning statement, a message
+        per non-returning one (mirrors the real adapter's contract)."""
+        from app.db.adapters.base import ScriptResultSet, ScriptRun
+        from app.services.sql_guard import split_sql_statements
+
+        result_sets: list[ScriptResultSet] = []
+        messages: list[str] = []
+        for stmt in split_sql_statements(sql, self.engine):
+            if self._returns_rows(stmt):
+                total = int(self._config.options.get("row_count", 3))
+                all_rows = self._synth_rows(total)
+                result_sets.append(
+                    ScriptResultSet(
+                        columns=[QueryColumn("id"), QueryColumn("label")],
+                        rows=all_rows[:max_rows],
+                        truncated=len(all_rows) > max_rows,
+                    )
+                )
+            else:
+                messages.append(f"{int(self._config.options.get('affected', 1))} row(s) affected")
+        return ScriptRun(result_sets=result_sets, messages=messages, execution_ms=0.5)
+
     async def execute(
         self,
         statement: str,
