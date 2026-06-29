@@ -52,6 +52,16 @@ def test_cte_select_is_select() -> None:
     assert stmts[0].operation == SqlOperation.SELECT
 
 
+@pytest.mark.parametrize("op_kw", ["UNION", "UNION ALL", "INTERSECT", "EXCEPT"])
+def test_set_operations_are_select(op_kw: str) -> None:
+    # UNION/INTERSECT/EXCEPT are read-only set operations and must classify as SELECT (so a
+    # user with SELECT access can run them), and must collect tables from BOTH sides.
+    stmts = extract_access(f"SELECT a FROM tutor {op_kw} SELECT a FROM student", PG)
+    assert len(stmts) == 1
+    assert stmts[0].operation == SqlOperation.SELECT
+    assert {t.name for t in stmts[0].tables} == {"tutor", "student"}
+
+
 def test_multi_statement() -> None:
     stmts = extract_access("SELECT * FROM a; DELETE FROM b;", PG)
     assert [s.operation for s in stmts] == [SqlOperation.SELECT, SqlOperation.DELETE]

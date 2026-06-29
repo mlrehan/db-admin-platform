@@ -31,7 +31,7 @@ from app.core.exceptions import (
     QueryTimeoutError,
     ValidationError,
 )
-from app.core.context import get_request_id
+from app.core.context import get_client_ip, get_request_id
 from app.core.logging import get_logger
 from app.db.adapters.base import QueryColumn
 from app.models.user import User
@@ -383,6 +383,7 @@ class QueryEngine:
             error_code=error_code,
             error_message=(error[:500] if error else None),
             request_id=get_request_id(),
+            ip_address=get_client_ip(),
         )
         try:
             await self._audit.record_query(event)
@@ -460,6 +461,7 @@ class QueryEngine:
             error_code=error_code,
             error_message=(error[:500] if error else None),
             request_id=get_request_id(),
+            ip_address=get_client_ip(),
         )
         try:
             await self._audit.record_query(event)

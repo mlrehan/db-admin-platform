@@ -55,6 +55,8 @@ export class CodeEditor extends HTMLElement {
         this.dispatchEvent(new CustomEvent("run", { bubbles: true }));
       }
     });
+    // Notify the parent on every edit (used to persist a draft).
+    this._textarea.addEventListener("input", () => this._emitChange());
 
     // On phones/touch screens, keep the native textarea (mobile-friendly); skip Monaco.
     if (prefersPlainTextarea()) {
@@ -88,9 +90,14 @@ export class CodeEditor extends HTMLElement {
         monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter,
         () => this.dispatchEvent(new CustomEvent("run", { bubbles: true }))
       );
+      this._monaco.onDidChangeModelContent(() => this._emitChange());
     } catch {
       // Fallback textarea stays; nothing to do.
     }
+  }
+
+  _emitChange() {
+    this.dispatchEvent(new CustomEvent("editor-change", { bubbles: true }));
   }
 
   getValue() {

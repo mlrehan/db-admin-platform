@@ -40,6 +40,7 @@ class QueryAuditEvent:
     error_code: str | None = None
     error_message: str | None = None
     request_id: str | None = None
+    ip_address: str | None = None
 
     @staticmethod
     def now() -> datetime:

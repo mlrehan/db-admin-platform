@@ -69,7 +69,11 @@ def _operation_for(node: exp.Expression) -> SqlOperation:
     if isinstance(node, exp.With):
         inner = node.this
         return _operation_for(inner) if inner is not None else SqlOperation.OTHER
-    if isinstance(node, (exp.Select, exp.Union, exp.Subquery)):
+    # Read shapes: a plain SELECT, a subquery, or a set operation (UNION / INTERSECT / EXCEPT).
+    # INTERSECT/EXCEPT are *not* subclasses of exp.Union in current sqlglot — they share the
+    # exp.SetOperation base — so match that base (with a fallback) to classify them as SELECT.
+    set_operation = getattr(exp, "SetOperation", exp.Union)
+    if isinstance(node, (exp.Select, exp.Union, set_operation, exp.Subquery)):
         return SqlOperation.SELECT
     if isinstance(node, exp.Insert):
         return SqlOperation.INSERT

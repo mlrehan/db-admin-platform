@@ -1,10 +1,30 @@
 /* Phase 8 module styling: grids, trees, editor, tabs, modal, toolbars. */
 
+/* Wrap any wide table so it scrolls inside its own container instead of overflowing the page.
+   Keeps page-level layout intact on small screens. */
+.table-scroll {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* Data grid (fallback table) */
 .grid-table {
   width: 100%;
   border-collapse: collapse;
   font-size: var(--fs-sm);
+}
+/* Resizable tables keep their set column widths instead of auto-fitting. */
+.resizable-table th,
+.resizable-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Let users select & copy cell text (some grids otherwise inherit user-select:none). */
+.grid-table td,
+.grid-table th .th-label {
+  user-select: text;
 }
 .grid-table thead th {
   position: sticky;

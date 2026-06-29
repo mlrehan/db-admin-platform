@@ -113,6 +113,15 @@ export async function promptText({
   return res.isConfirmed ? String(res.value).trim() : null;
 }
 
+// Programmatically dismiss any open SweetAlert dialog (no-op if none / not loaded).
+export function closeDialog() {
+  try {
+    window.Swal?.close?.();
+  } catch {
+    /* ignore */
+  }
+}
+
 // Show a blocking busy/loading dialog; returns a function to close it.
 export async function loading(title = "Working…", text = "") {
   const Swal = await loadSwal();

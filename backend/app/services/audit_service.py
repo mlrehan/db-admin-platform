@@ -47,6 +47,7 @@ class DatabaseAuditSink:
             error_code=event.error_code,
             error_message=event.error_message,
             request_id=event.request_id,
+            ip_address=event.ip_address,
         )
         async with self._sessionmaker() as session:
             session.add(record)

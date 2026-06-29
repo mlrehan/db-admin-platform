@@ -14,6 +14,7 @@ import "./components/ui-toast.js";
 import "./components/app-root.js";
 import { initTheme } from "./core/theme.js";
 import { initNotify } from "./core/notify.js";
+import { startIdleTimer, stopIdleTimer } from "./core/idle-timeout.js";
 import "./modules/auth/login-view.js";
 import "./modules/connections/dashboard-view.js";
 
@@ -37,6 +38,10 @@ const ROUTES = [
   {
     path: "/data", view: "viewer-view", requiresAuth: true,
     load: () => import("./modules/viewer/viewer-view.js"),
+  },
+  {
+    path: "/activity", view: "activity-view", requiresAuth: true,
+    load: () => import("./modules/activity/activity-view.js"),
   },
   {
     path: "/admin", view: "admin-view", requiresAuth: true, roles: ["admin"],
@@ -79,8 +84,14 @@ async function bootstrap() {
   // Surface API errors as toasts globally.
   bus.on(Events.UNAUTHORIZED, () => app.router.navigate("/login"));
 
+  // Run the inactivity timer only while signed in (start on login, stop on logout).
+  bus.on(Events.AUTH_CHANGED, ({ authenticated }) =>
+    authenticated ? startIdleTimer() : stopIdleTimer()
+  );
+
   // Try to restore a prior session before the first route resolves.
   await app.auth.restore();
+  if (app.auth.isAuthenticated()) startIdleTimer();
   app.router.start();
 }
 

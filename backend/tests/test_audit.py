@@ -101,22 +101,39 @@ async def test_destructive_query_audited(client: AsyncClient, seed_users, fake_p
 # --- RBAC + immutability -----------------------------------------------------------------
 
 
-async def test_viewer_cannot_read_audit(client: AsyncClient, seed_users) -> None:
+async def test_non_admin_sees_only_own_audit(client: AsyncClient, seed_users, fake_pg) -> None:
+    # The admin runs a query, creating an admin-owned audit record.
+    admin = _auth(await _login(client, "admin@test.com", "admin-password-123"))
+    admin_id = (await client.get("/api/v1/auth/me", headers=admin)).json()["id"]
+    sid = await _open_session(client, admin)
+    await client.post(f"/api/v1/sessions/{sid}/query", headers=admin, json={"sql": "SELECT 1"})
+
+    # A regular viewer may read their OWN audit log (200), but it contains none of the admin's
+    # records (the viewer has run nothing).
     viewer = _auth(await _login(client, "viewer@test.com", "viewer-password-123"))
     resp = await client.get("/api/v1/audit/logs", headers=viewer)
-    assert resp.status_code == 403
-    assert resp.json()["error"]["code"] == "AUTHORIZATION_ERROR"
+    assert resp.status_code == 200, resp.text
+    assert all(e["user_email"] == "viewer@test.com" for e in resp.json())
 
 
-async def test_developer_cannot_read_audit(client: AsyncClient, seed_users) -> None:
+async def test_non_admin_cannot_read_others_via_param(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    # Param-tampering protection: forcing ?user_id=<admin> must NOT expose the admin's logs.
     admin = _auth(await _login(client, "admin@test.com", "admin-password-123"))
-    await client.post(
-        "/api/v1/users",
-        headers=admin,
-        json={"email": "dev9@test.com", "password": "developer-pass-1", "role": "developer"},
-    )
-    dev = _auth(await _login(client, "dev9@test.com", "developer-pass-1"))
-    assert (await client.get("/api/v1/audit/logs", headers=dev)).status_code == 403
+    admin_id = (await client.get("/api/v1/auth/me", headers=admin)).json()["id"]
+    sid = await _open_session(client, admin)
+    await client.post(f"/api/v1/sessions/{sid}/query", headers=admin, json={"sql": "SELECT 42"})
+    # Confirm the admin's record exists (admin can see all).
+    assert any(e["statement"] == "SELECT 42" for e in
+               (await client.get("/api/v1/audit/logs", headers=admin)).json())
+
+    viewer = _auth(await _login(client, "viewer@test.com", "viewer-password-123"))
+    tampered = await client.get(f"/api/v1/audit/logs?user_id={admin_id}", headers=viewer)
+    assert tampered.status_code == 200
+    # Server forces user_id to the caller — none of the admin's records leak through.
+    assert all(e["user_email"] != "admin@test.com" for e in tampered.json())
+    assert not any(e["statement"] == "SELECT 42" for e in tampered.json())
 
 
 async def test_no_audit_mutation_endpoints(client: AsyncClient, seed_users) -> None:

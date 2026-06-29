@@ -15,12 +15,21 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import Response
 
-from app.core.context import request_id_ctx
+from app.core.context import client_ip_ctx, request_id_ctx
 from app.core.logging import get_logger
 
 logger = get_logger("app.access")
 
 _REQUEST_ID_HEADER = "X-Request-ID"
+
+
+def _client_ip(request: Request) -> str | None:
+    """Best-effort client IP. Honours the first hop in ``X-Forwarded-For`` (set by a trusted
+    reverse proxy such as the bundled nginx), else falls back to the socket peer."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip() or None
+    return request.client.host if request.client else None
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
@@ -29,6 +38,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         request_id = request.headers.get(_REQUEST_ID_HEADER) or uuid.uuid4().hex
         token = request_id_ctx.set(request_id)
+        ip_token = client_ip_ctx.set(_client_ip(request))
         start = time.perf_counter()
         try:
             response = await call_next(request)
@@ -58,3 +68,4 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             return response
         finally:
             request_id_ctx.reset(token)
+            client_ip_ctx.reset(ip_token)

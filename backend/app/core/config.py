@@ -118,7 +118,10 @@ class SecuritySettings(BaseSettings):
     # --- JWT ---
     jwt_secret: SecretStr = SecretStr("")
     jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
-    access_token_ttl_seconds: int = Field(default=900, gt=0)  # 15 min
+    # Short-lived access token, transparently refreshed by the client. 1h keeps refresh churn
+    # low while staying short enough to bound a leaked token's usefulness. The user-facing
+    # "logged out after 2h of inactivity" behaviour is enforced client-side (idle timer).
+    access_token_ttl_seconds: int = Field(default=3600, gt=0)  # 1 hour
     refresh_token_ttl_seconds: int = Field(default=1_209_600, gt=0)  # 14 days
     jwt_issuer: str = "db-admin-platform"
 

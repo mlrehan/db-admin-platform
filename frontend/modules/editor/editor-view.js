@@ -14,6 +14,10 @@ import "../../components/data-grid.js";
 // Guard against accidentally loading a huge dump into the in-browser editor.
 const MAX_SQL_FILE_BYTES = 8 * 1024 * 1024; // 8 MB
 
+// The current editor text is persisted here so an unsaved query survives navigation and page
+// reloads (restored when the user returns to the editor).
+const DRAFT_KEY = "dbadmin.sql-draft";
+
 export class EditorView extends HTMLElement {
   connectedCallback() {
     this.innerHTML = `
@@ -43,6 +47,16 @@ export class EditorView extends HTMLElement {
     this._runBtn = this.querySelector("#run");
     this._fileInput = this.querySelector("#file-input");
 
+    // Restore the most recent unsaved query (preserved across navigation / reloads).
+    try {
+      const draft = localStorage.getItem(DRAFT_KEY);
+      if (draft !== null) this._editor.setValue(draft);
+    } catch {
+      /* storage unavailable — fall back to the default query */
+    }
+    // Persist the draft on every edit (debounced).
+    this.addEventListener("editor-change", () => this._saveDraft());
+
     this._runBtn.addEventListener("click", () => this._run());
     this.addEventListener("run", () => this._run());
     this.querySelector("#open-file").addEventListener("click", () => this._fileInput.click());
@@ -51,6 +65,25 @@ export class EditorView extends HTMLElement {
     this.querySelectorAll(".rtab").forEach((t) =>
       t.addEventListener("click", () => this._selectTab(t.dataset.rtab))
     );
+  }
+
+  disconnectedCallback() {
+    // Flush any pending draft immediately when leaving the editor.
+    clearTimeout(this._draftTimer);
+    this._writeDraft();
+  }
+
+  _saveDraft() {
+    clearTimeout(this._draftTimer);
+    this._draftTimer = setTimeout(() => this._writeDraft(), 400);
+  }
+
+  _writeDraft() {
+    try {
+      localStorage.setItem(DRAFT_KEY, this._editor.getValue());
+    } catch {
+      /* storage full / unavailable — non-fatal */
+    }
   }
 
   async _openFile(file) {

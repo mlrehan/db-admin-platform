@@ -93,7 +93,11 @@
 
 .app-main {
   grid-area: main;
-  overflow: auto;
+  overflow-y: auto;
+  /* Never let content (e.g. a wide table) push the page sideways — wide tables get their own
+     horizontal scroll via `.table-scroll` / `.grid-scroll` containers instead. */
+  overflow-x: hidden;
+  min-width: 0;
   background: var(--bg-base);
 }
 

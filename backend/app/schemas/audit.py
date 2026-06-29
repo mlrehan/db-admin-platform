@@ -27,4 +27,5 @@ class AuditLogOut(BaseModel):
     error_code: str | None
     error_message: str | None
     request_id: str | None
+    ip_address: str | None = None
     created_at: datetime

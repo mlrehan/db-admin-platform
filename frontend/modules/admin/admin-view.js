@@ -6,10 +6,11 @@ import { bus, Events } from "../../core/events.js";
 import { openModal } from "../../components/modal.js";
 import { confirm } from "../../core/notify.js";
 import { loadTomSelect } from "../../core/tom-select.js";
+import { makeResizableTable } from "../../components/resizable-table.js";
 import { escapeHtml } from "../../components/view-helpers.js";
+import "../../components/audit-log.js";
 
 const ROLES = ["admin", "dba", "developer", "viewer"];
-const AUDIT_PAGE_SIZE = 100; // rows fetched per infinite-scroll page in the audit log
 
 export class AdminView extends HTMLElement {
   connectedCallback() {
@@ -35,7 +36,6 @@ export class AdminView extends HTMLElement {
     this.querySelectorAll(".tab").forEach((t) =>
       t.classList.toggle("active", t.dataset.tab === tab)
     );
-    this._auditObserver?.disconnect(); // stop any infinite-scroll watcher from the audit tab
     if (tab === "users") this._renderUsers();
     else if (tab === "permissions") this._renderPermissions();
     else this._renderAudit();
@@ -74,7 +74,7 @@ export class AdminView extends HTMLElement {
           <span class="spacer"></span>
           <button class="btn btn-primary" id="addgrant">+ New grant</button>
         </div>
-        <table class="grid-table">
+        <div class="table-scroll"><table class="grid-table">
           <thead><tr><th>Who</th><th>Connection</th><th>Databases</th><th>Tables</th>
             <th>Operations</th><th style="text-align:right">Actions</th></tr></thead>
           <tbody>${
@@ -92,7 +92,8 @@ export class AdminView extends HTMLElement {
               )
               .join("") || `<tr><td colspan="6" class="muted" style="padding:16px">No grants — non-admin users fall back to role permissions.</td></tr>`
           }</tbody>
-        </table>`;
+        </table></div>`;
+      makeResizableTable(this._body.querySelector(".grid-table"));
       this._grants = grants;
       this.querySelector("#addgrant").addEventListener("click", () => this._grantForm());
       this._body.querySelectorAll("[data-edit]").forEach((btn) =>
@@ -339,11 +340,12 @@ export class AdminView extends HTMLElement {
           <span class="muted">${users.length} users</span><span class="spacer"></span>
           <button class="btn btn-primary" id="adduser">+ New user</button>
         </div>
-        <table class="grid-table">
+        <div class="table-scroll"><table class="grid-table">
           <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Last login</th>
             <th style="text-align:right">Actions</th></tr></thead>
           <tbody>${users.map((u) => this._userRow(u)).join("")}</tbody>
-        </table>`;
+        </table></div>`;
+      makeResizableTable(this._body.querySelector(".grid-table"));
       this.querySelector("#adduser").addEventListener("click", () => this._userForm());
       this._body.querySelectorAll("[data-action]").forEach((btn) =>
         btn.addEventListener("click", () =>
@@ -434,121 +436,10 @@ export class AdminView extends HTMLElement {
 
   // --- audit ---------------------------------------------------------------------------
 
-  async _renderAudit() {
-    this._body.innerHTML = `
-      <div class="row" style="padding:12px 16px; border-bottom:1px solid var(--border); gap:8px">
-        <select class="input" id="f-cat" style="width:auto">
-          <option value="">All categories</option>
-          <option value="read">read</option><option value="write">write</option>
-          <option value="ddl">ddl</option>
-        </select>
-        <label class="row" style="gap:6px"><input type="checkbox" id="f-dest"> destructive only</label>
-        <label class="row" style="gap:6px"><input type="checkbox" id="f-fail"> failures only</label>
-        <span class="spacer"></span>
-        <button class="btn" id="reload">Refresh</button>
-      </div>
-      <div id="auditrows"><div class="placeholder">Loading…</div></div>`;
-    this.querySelector("#reload").addEventListener("click", () => this._loadAudit());
-    ["f-cat", "f-dest", "f-fail"].forEach((id) =>
-      this.querySelector("#" + id).addEventListener("change", () => this._loadAudit())
-    );
-    this._loadAudit();
-  }
-
-  _auditFilters() {
-    const filters = {};
-    const cat = this.querySelector("#f-cat").value;
-    if (cat) filters.category = cat;
-    if (this.querySelector("#f-dest").checked) filters.destructive = true;
-    if (this.querySelector("#f-fail").checked) filters.success = false;
-    return filters;
-  }
-
-  // Initial (or filter-changed) load: reset paging and render the first page, then watch a
-  // sentinel at the bottom to lazily fetch more (infinite scroll).
-  async _loadAudit() {
-    this._auditObserver?.disconnect();
-    this._auditOffset = 0;
-    this._auditDone = false;
-    this._auditLoading = false;
-    const box = this.querySelector("#auditrows");
-    box.innerHTML = `<div class="placeholder">Loading…</div>`;
-    let logs;
-    try {
-      logs = await app.api.listAuditLogs({
-        ...this._auditFilters(),
-        limit: AUDIT_PAGE_SIZE,
-        offset: 0,
-      });
-    } catch (err) {
-      box.innerHTML = `<div class="placeholder">${escapeHtml(err.message)}</div>`;
-      return;
-    }
-    if (!logs.length) {
-      box.innerHTML = `<div class="placeholder muted">No audit entries.</div>`;
-      return;
-    }
-    box.innerHTML = `
-      <table class="grid-table">
-        <thead><tr><th>Time</th><th>User</th><th>Engine</th><th>Cat</th>
-          <th>Statement</th><th>Result</th><th>ms</th></tr></thead>
-        <tbody id="auditbody">${logs.map((l) => this._auditRow(l)).join("")}</tbody>
-      </table>
-      <div id="audit-sentinel" class="muted" style="padding:12px; text-align:center"></div>`;
-    this._auditOffset = logs.length;
-    if (logs.length < AUDIT_PAGE_SIZE) {
-      this._auditDone = true;
-      this.querySelector("#audit-sentinel").textContent = "— end of log —";
-      return;
-    }
-    // Auto-load the next page when the sentinel scrolls into view.
-    const sentinel = this.querySelector("#audit-sentinel");
-    this._auditObserver = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) this._loadMoreAudit();
-    });
-    this._auditObserver.observe(sentinel);
-  }
-
-  async _loadMoreAudit() {
-    if (this._auditLoading || this._auditDone) return;
-    this._auditLoading = true;
-    const sentinel = this.querySelector("#audit-sentinel");
-    const body = this.querySelector("#auditbody");
-    if (sentinel) sentinel.textContent = "Loading more…";
-    try {
-      const logs = await app.api.listAuditLogs({
-        ...this._auditFilters(),
-        limit: AUDIT_PAGE_SIZE,
-        offset: this._auditOffset,
-      });
-      if (body && logs.length) body.insertAdjacentHTML("beforeend", logs.map((l) => this._auditRow(l)).join(""));
-      this._auditOffset += logs.length;
-      if (logs.length < AUDIT_PAGE_SIZE) {
-        this._auditDone = true;
-        this._auditObserver?.disconnect();
-        if (sentinel) sentinel.textContent = "— end of log —";
-      } else if (sentinel) {
-        sentinel.textContent = "";
-      }
-    } catch (err) {
-      if (sentinel) sentinel.textContent = err.message;
-    } finally {
-      this._auditLoading = false;
-    }
-  }
-
-  _auditRow(l) {
-    const cat = { read: "cat-read", write: "cat-write", ddl: "cat-ddl" }[l.category] || "";
-    return `<tr>
-      <td class="muted" style="white-space:nowrap">${new Date(l.created_at).toLocaleString()}</td>
-      <td>${escapeHtml(l.user_email || "—")}</td>
-      <td class="muted">${escapeHtml(l.engine || "")}</td>
-      <td><span class="badge ${cat}">${escapeHtml(l.category || "")}</span>
-        ${l.destructive ? '<span class="badge cat-ddl">⚠</span>' : ""}</td>
-      <td class="mono" style="max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap"
-        title="${escapeHtml(l.statement)}">${escapeHtml(l.statement)}</td>
-      <td>${l.success ? '<span style="color:var(--success)">ok</span>' : `<span style="color:var(--danger)">${escapeHtml(l.error_code || "fail")}</span>`}</td>
-      <td class="mono">${Math.round(l.duration_ms)}</td></tr>`;
+  _renderAudit() {
+    // The reusable <audit-log> component handles filters, infinite scroll, resizable columns
+    // and CSV/Excel export. The backend scopes what's returned (admins see everything).
+    this._body.replaceChildren(document.createElement("audit-log"));
   }
 }
 
