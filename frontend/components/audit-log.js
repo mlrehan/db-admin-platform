@@ -43,7 +43,7 @@ export class AuditLog extends HTMLElement {
         <button class="btn btn-ghost" id="export-xls">⬇ Excel</button>
         <button class="btn" id="reload">Refresh</button>
       </div>
-      <div id="auditrows"><div class="placeholder">Loading…</div></div>`;
+      <div id="auditrows" class="table-scroll"><div class="placeholder">Loading…</div></div>`;
 
     this._rowsBox = this.querySelector("#auditrows");
     this.querySelector("#reload").addEventListener("click", () => this._load());
@@ -103,13 +103,14 @@ export class AuditLog extends HTMLElement {
       this._rowsBox.innerHTML = `<div class="placeholder muted">No audit entries.</div>`;
       return;
     }
+    // #auditrows is the bounded scroll container (sticky headers, vertical scroll for infinite
+    // load, horizontal scroll at its bottom). The sentinel lives inside it and the observer is
+    // rooted to it so "load more" fires on scrolling the table, not the page.
     this._rowsBox.innerHTML = `
-      <div class="table-scroll">
-        <table class="grid-table" id="audit-table">
-          <thead><tr>${COLUMNS.map((c) => `<th><span class="th-label">${c.label}</span></th>`).join("")}</tr></thead>
-          <tbody id="auditbody">${logs.map((l) => this._row(l)).join("")}</tbody>
-        </table>
-      </div>
+      <table class="grid-table wrap" id="audit-table">
+        <thead><tr>${COLUMNS.map((c) => `<th><span class="th-label">${c.label}</span></th>`).join("")}</tr></thead>
+        <tbody id="auditbody">${logs.map((l) => this._row(l)).join("")}</tbody>
+      </table>
       <div id="audit-sentinel" class="muted" style="padding:12px; text-align:center"></div>`;
     makeResizableTable(this.querySelector("#audit-table"));
     this._offset = logs.length;
@@ -119,9 +120,12 @@ export class AuditLog extends HTMLElement {
       return;
     }
     const sentinel = this.querySelector("#audit-sentinel");
-    this._observer = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) this._loadMore();
-    });
+    this._observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) this._loadMore();
+      },
+      { root: this._rowsBox }
+    );
     this._observer.observe(sentinel);
   }
 

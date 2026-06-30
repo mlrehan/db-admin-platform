@@ -145,6 +145,84 @@ async def test_script_denied_as_a_unit_before_execution(
     assert "DELETE" in body["statements"][0]["error"]
 
 
+async def _granted_user_with_routines(
+    client: AsyncClient, admin: dict, routines: dict
+) -> tuple[dict, str]:
+    """A viewer granted SELECT on appdb, on a connection whose adapter exposes ``routines``."""
+    conn = await client.post(
+        "/api/v1/connections", headers=admin,
+        json={"name": "rtn-pg", "engine": "postgresql", "host": "h", "database": "appdb",
+              "username": "u", "password": "secret-password-1", "options": {"routines": routines}},
+    )
+    conn_id = conn.json()["id"]
+    uid = (await client.post(
+        "/api/v1/users", headers=admin,
+        json={"email": "rtnuser@test.com", "password": "user-strong-pass-1", "role": "viewer"},
+    )).json()["id"]
+    await client.post("/api/v1/access/grants", headers=admin,
+                      json={"subject_type": "user", "subject_id": uid, "connection_id": conn_id,
+                            "operations": ["SELECT"], "database": "appdb"})
+    user = await _login(client, "rtnuser@test.com", "user-strong-pass-1")
+    sid = (await client.post("/api/v1/sessions", headers=user,
+                             json={"connection_id": conn_id})).json()["id"]
+    return user, sid
+
+
+async def test_readonly_routine_exec_allowed_with_select(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    # A SELECT user may EXEC a routine whose body only reads tables they can read.
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    user, sid = await _granted_user_with_routines(
+        client, admin, {"usp_test": "CREATE PROCEDURE usp_test AS BEGIN SELECT * FROM users; END"}
+    )
+    resp = await client.post(f"/api/v1/sessions/{sid}/script", headers=user,
+                             json={"sql": "EXEC usp_test;"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True
+
+
+async def test_writing_routine_exec_denied(client: AsyncClient, seed_users, fake_pg) -> None:
+    # A routine that writes must NOT be executable by a SELECT-only user.
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    user, sid = await _granted_user_with_routines(
+        client, admin, {"usp_del": "CREATE PROCEDURE usp_del AS BEGIN DELETE FROM users; END"}
+    )
+    resp = await client.post(f"/api/v1/sessions/{sid}/script", headers=user,
+                             json={"sql": "EXEC usp_del;"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is False
+    assert body["statements"][0]["error_code"] == "ACCESS_DENIED"
+
+
+async def test_unknown_routine_exec_denied(client: AsyncClient, seed_users, fake_pg) -> None:
+    # A routine whose body can't be fetched/verified is denied (fail-closed).
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    user, sid = await _granted_user_with_routines(client, admin, {})
+    resp = await client.post(f"/api/v1/sessions/{sid}/script", headers=user,
+                             json={"sql": "EXEC mystery_proc;"})
+    assert resp.json()["success"] is False
+    assert resp.json()["statements"][0]["error_code"] == "ACCESS_DENIED"
+
+
+async def test_admin_execs_routine_without_validation(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    # Admins bypass routine validation entirely.
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    conn = await client.post(
+        "/api/v1/connections", headers=admin,
+        json={"name": "admin-rtn", "engine": "postgresql", "host": "h", "database": "appdb",
+              "username": "u", "password": "secret-password-1"},
+    )
+    sid = (await client.post("/api/v1/sessions", headers=admin,
+                             json={"connection_id": conn.json()["id"]})).json()["id"]
+    resp = await client.post(f"/api/v1/sessions/{sid}/script", headers=admin,
+                             json={"sql": "EXEC any_proc;"})
+    assert resp.status_code == 200 and resp.json()["success"] is True
+
+
 async def test_temp_table_read_script_allowed_with_select(
     client: AsyncClient, seed_users, fake_pg
 ) -> None:

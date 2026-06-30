@@ -20,6 +20,11 @@ class PostgreSQLAdapter(SQLAlchemyAdapter):
     # Catalog/metadata schemas non-admins must not see (pg_catalog, pg_toast, pg_temp_*, …).
     system_schemas = frozenset({"information_schema"})
     system_schema_prefixes = ("pg_",)
+    # pg_proc.prosrc is the bare routine body (SQL or pl/pgsql).
+    routine_definition_sql = (
+        "SELECT prosrc FROM pg_proc WHERE proname = :name "
+        "ORDER BY oid LIMIT 1"
+    )
 
     def _connect_args(self) -> dict[str, Any]:
         args: dict[str, Any] = {

@@ -24,6 +24,10 @@ class MySQLAdapter(SQLAlchemyAdapter):
     )
     # In MySQL a "schema" is a database, so the system schemas mirror the hidden databases.
     system_schemas = frozenset({"information_schema", "mysql", "performance_schema", "sys"})
+    routine_definition_sql = (
+        "SELECT routine_definition FROM information_schema.routines "
+        "WHERE routine_schema = DATABASE() AND routine_name = :name LIMIT 1"
+    )
 
     def _url_query(self) -> dict[str, str]:
         # Full Unicode (incl. 4-byte) support.

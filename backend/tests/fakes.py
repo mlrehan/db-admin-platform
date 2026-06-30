@@ -112,6 +112,11 @@ class FakeAdapter(DatabaseAdapter):
     def _synth_rows(self, n: int) -> list[tuple[Any, ...]]:
         return [(i, f"row-{i}") for i in range(n)]
 
+    async def get_routine_definition(self, name: str) -> str | None:
+        # Routine bodies are supplied via options={"routines": {name: definition}}.
+        routines = self._config.options.get("routines") or {}
+        return routines.get(name.split(".")[-1])
+
     async def run_script(self, sql: str, *, max_rows: int = 1000):
         """Single-session script run: one result set per row-returning statement, a message
         per non-returning one (mirrors the real adapter's contract)."""

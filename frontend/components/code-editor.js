@@ -53,6 +53,17 @@ export class CodeEditor extends HTMLElement {
       // Ctrl/Cmd+Enter runs the query (consumed by the parent view).
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         this.dispatchEvent(new CustomEvent("run", { bubbles: true }));
+        return;
+      }
+      // Tab inserts an indent and keeps focus (instead of leaving the editor).
+      if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        const ta = this._textarea;
+        const s = ta.selectionStart;
+        const end = ta.selectionEnd;
+        ta.value = ta.value.slice(0, s) + "\t" + ta.value.slice(end);
+        ta.selectionStart = ta.selectionEnd = s + 1;
+        this._emitChange();
       }
     });
     // Notify the parent on every edit (used to persist a draft).

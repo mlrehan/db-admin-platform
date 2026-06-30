@@ -53,6 +53,7 @@ class MSSQLAdapter(SQLAlchemyAdapter):
     # sent as ONE batch; results come back via the driver's native nextset().
     script_mode = "batch"
     databases_sql = "SELECT name FROM sys.databases"
+    routine_definition_sql = "SELECT OBJECT_DEFINITION(OBJECT_ID(:name))"
     hidden_databases = frozenset({"master", "tempdb", "model", "msdb"})
     # SQL Server system schemas + the fixed database-role schemas (no user objects).
     system_schemas = frozenset(

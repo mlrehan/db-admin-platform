@@ -136,15 +136,19 @@ class AccessPolicy:
             return False
         return any(g.scope_covers(database, schema, table) for g in self.grants)
 
-    def enforce_script(self, engine: EngineType, database: str | None, sql: str) -> None:
+    def enforce_script(self, engine: EngineType, database: str | None, sql: str) -> list[str]:
         """Authorize a whole multi-statement script (temp tables, variables, procedural blocks,
         read-only dynamic SQL) as a unit. Admins bypass; non-admins are default-deny.
 
         Session-local objects (#temp / @var / CREATE TEMP) need no grant; every real-table
         access the script performs must be covered by a grant. Read-only dynamic SQL is allowed
-        only when it can be statically proven safe."""
+        only when it can be statically proven safe.
+
+        Returns the names of any **named routines** the script EXEC/CALLs — those can't be
+        validated here (they need catalog access), so the query engine authorizes each routine's
+        body separately. Admins return an empty list."""
         if self.is_admin:
-            return
+            return []
         if not self.has_grants:
             raise AuthorizationError(
                 "You have not been granted access to run queries on this connection.",
@@ -157,17 +161,22 @@ class AccessPolicy:
         if access.denied_reason:
             raise AuthorizationError(access.denied_reason, code="ACCESS_DENIED")
         for req in access.requirements:
-            schema = req.table.schema if req.table else None
-            table = req.table.name if req.table else None
-            if not any(g.covers(req.operation, database, schema, table) for g in self.grants):
-                op = req.operation.value
-                where = f" on table '{table}'" if table else ""
-                raise AuthorizationError(
-                    f"You don't have permission to run {op} statements{where}. "
-                    f"Ask an administrator to grant you {op} access on this database.",
-                    code="ACCESS_DENIED",
-                    details={"operation": op, "database": database, "table": table},
-                )
+            self.require_grant(req.operation, database, req.table)
+        return list(access.routines)
+
+    def require_grant(self, operation: SqlOperation, database: str | None, table) -> None:
+        """Raise ACCESS_DENIED unless some grant covers (operation, database, table)."""
+        schema = table.schema if table else None
+        name = table.name if table else None
+        if not any(g.covers(operation, database, schema, name) for g in self.grants):
+            op = operation.value
+            where = f" on table '{name}'" if name else ""
+            raise AuthorizationError(
+                f"You don't have permission to run {op} statements{where}. "
+                f"Ask an administrator to grant you {op} access on this database.",
+                code="ACCESS_DENIED",
+                details={"operation": op, "database": database, "table": name},
+            )
 
     def enforce_query(self, engine: EngineType, database: str | None, sql: str) -> None:
         """Raise :class:`AuthorizationError` if ``sql`` touches anything not granted.

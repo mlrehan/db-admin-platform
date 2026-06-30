@@ -25,6 +25,7 @@ from typing import Any
 from app.core.config import QuerySettings
 from app.core.exceptions import (
     AppError,
+    AuthorizationError,
     NotFoundError,
     QueryCancelledError,
     QueryExecutionError,
@@ -36,6 +37,7 @@ from app.core.logging import get_logger
 from app.db.adapters.base import QueryColumn
 from app.models.user import User
 from app.services.access_control import AccessPolicy
+from app.services.sql_introspect import SqlOperation
 from app.services.audit_sink import AuditSink, QueryAuditEvent
 from app.services.orchestrator import LiveSession
 from app.services.sql_guard import SqlAnalysis, SqlGuard
@@ -126,7 +128,7 @@ class QueryEngine:
         else:
             self._guard.enforce(user, analysis)
 
-    def _enforce_script(
+    async def _enforce_script(
         self,
         user: User,
         sql: str,
@@ -136,11 +138,49 @@ class QueryEngine:
     ) -> None:
         """Authorize a whole multi-statement script. With a policy (all user paths) the
         script-aware analyzer governs (temp tables/variables need no grant, dynamic SQL is
-        validated); otherwise the coarse role check applies."""
-        if policy is not None:
-            policy.enforce_script(session.adapter.engine, session.adapter.active_database, sql)
-        else:
+        validated). Named routines the script EXEC/CALLs are authorized by fetching and
+        validating each routine's body (must be read-only over tables the caller may read).
+        Without a policy (defensive fallback) the coarse role check applies."""
+        if policy is None:
             self._guard.enforce(user, analysis)
+            return
+        routines = policy.enforce_script(
+            session.adapter.engine, session.adapter.active_database, sql
+        )
+        for name in routines:
+            await self._authorize_routine(name, session, policy)
+
+    async def _authorize_routine(
+        self, name: str, session: LiveSession, policy: AccessPolicy
+    ) -> None:
+        """Allow EXEC/CALL of a stored routine only if its body is provably read-only and reads
+        only tables the caller may read. Admins never reach here (they return no routines)."""
+        from app.services.sql_script_analyzer import analyze_routine_definition
+
+        engine = session.adapter.engine
+        database = session.adapter.active_database
+        get_def = getattr(session.adapter, "get_routine_definition", None)
+        definition = await get_def(name) if get_def else None
+        if not definition:
+            raise AuthorizationError(
+                f"Stored routine '{name}' could not be verified as read-only; execution denied.",
+                code="ACCESS_DENIED",
+            )
+        access = analyze_routine_definition(definition, engine)
+        if access.denied_reason or access.routines:
+            raise AuthorizationError(
+                f"Stored routine '{name}' is not provably read-only "
+                f"(it performs unsafe or nested operations) and cannot be executed with your access.",
+                code="ACCESS_DENIED",
+            )
+        for req in access.requirements:
+            if req.operation != SqlOperation.SELECT:
+                raise AuthorizationError(
+                    f"Stored routine '{name}' performs {req.operation.value}; you may only "
+                    f"execute read-only routines.",
+                    code="ACCESS_DENIED",
+                )
+            policy.require_grant(SqlOperation.SELECT, database, req.table)
 
     # --- buffered execution --------------------------------------------------------------
 
@@ -235,7 +275,7 @@ class QueryEngine:
         async with session.lock:
             session.touch()
             try:
-                self._enforce_script(user, sql, analysis, session, policy)
+                await self._enforce_script(user, sql, analysis, session, policy)
                 run = await asyncio.wait_for(
                     session.adapter.run_script(sql, max_rows=capped),
                     self._settings.statement_timeout_seconds,

@@ -45,6 +45,10 @@ _PROCEDURAL_KEYWORDS = {
 }
 # Keywords that introduce dynamic / routine execution — handled specially.
 _EXEC_KEYWORDS = {"exec", "execute"}
+# EXEC / CALL of a *named* routine (vs. dynamic EXEC(@sql)). Captured for read-only validation
+# of the routine body, done later with catalog access.
+_ROUTINE_KEYWORDS = {"exec", "execute", "call"}
+_NAMED_ROUTINE_RE = re.compile(r"^\s*(?:exec(?:ute)?|call)\s+([\[\]\w.\"`]+)", re.IGNORECASE)
 
 # A table reference is session-local (no grant needed) if its name is a temp/var or was
 # created as a temporary object earlier in the script.
@@ -87,6 +91,9 @@ class AccessRequirement:
 class ScriptAccess:
     requirements: list[AccessRequirement] = field(default_factory=list)
     denied_reason: str | None = None  # if set, deny regardless of grants
+    # Named routines the script EXEC/CALLs — authorized separately by fetching and validating
+    # each routine's body (it must be read-only over tables the caller may read).
+    routines: list[str] = field(default_factory=list)
 
 
 def _leading_keyword(stmt: str) -> str:
@@ -209,16 +216,34 @@ def _fallback_requirements(stmt: str, locals_: set[str]) -> list[AccessRequireme
     return reqs
 
 
+def _clean_routine_name(name: str) -> str:
+    return name.replace("[", "").replace("]", "").replace('"', "").replace("`", "")
+
+
+def _analyze_exec_or_call(
+    stmt: str, kw: str, engine: EngineType, vars_: dict[str, str], locals_: set[str],
+    script: ScriptAccess,
+) -> None:
+    """Route an EXEC/CALL statement: validate read-only dynamic SQL inline, or record a named
+    routine for later body-based authorization (with catalog access)."""
+    if kw in _EXEC_KEYWORDS and _EXEC_DYNAMIC_RE.match(stmt):
+        _analyze_dynamic_exec(stmt, engine, vars_, locals_, script)
+        return
+    named = _NAMED_ROUTINE_RE.match(stmt)
+    if named:
+        script.routines.append(_clean_routine_name(named.group(1)))
+    else:
+        script.denied_reason = "Could not identify the routine being executed; execution denied."
+
+
 def _analyze_dynamic_exec(
     stmt: str, engine: EngineType, vars_: dict[str, str], locals_: set[str], script: ScriptAccess
 ) -> None:
     """Validate an ``EXEC(@sql)`` / ``EXEC('…')`` as read-only, or set a precise denial."""
     m = _EXEC_DYNAMIC_RE.match(stmt)
     if not m:
-        # EXEC <named routine> — routine execution authorization is handled elsewhere; deny
-        # here with a clear message rather than silently allowing.
         script.denied_reason = (
-            "Executing a stored routine by name is not permitted for your access level."
+            "Dynamic SQL could not be statically verified as read-only and was denied."
         )
         return
     token = m.group(1)
@@ -247,9 +272,57 @@ def _analyze_dynamic_exec(
     script.requirements.extend(_requirements_from_parsed(inner, locals_))
 
 
+_BLOCK_KW_RE = re.compile(r"(begin|end|try|catch)\b", re.IGNORECASE)
+
+
+def _flatten_blocks(stmt: str) -> list[str]:
+    """Split a statement on word-bounded BEGIN/END/TRY/CATCH (literal-aware) so statements glued
+    inside a procedural block (e.g. ``BEGIN DELETE FROM t``) are each analyzed for permissions.
+    Used for *analysis only* — execution keeps blocks intact."""
+    parts: list[str] = []
+    buf: list[str] = []
+    i, n = 0, len(stmt)
+    while i < n:
+        ch = stmt[i]
+        if ch in ("'", '"', "`"):  # copy string/identifier literal verbatim
+            q = ch
+            buf.append(ch)
+            i += 1
+            while i < n:
+                buf.append(stmt[i])
+                if stmt[i] == q:
+                    if q == "'" and i + 1 < n and stmt[i + 1] == "'":
+                        buf.append(stmt[i + 1])
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        # A block keyword only at a word boundary.
+        if ch.isalpha() and (i == 0 or not (stmt[i - 1].isalnum() or stmt[i - 1] == "_")):
+            m = _BLOCK_KW_RE.match(stmt[i:])
+            if m:
+                parts.append("".join(buf))
+                buf = []
+                i += m.end()
+                continue
+        buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _statements_for_analysis(sql: str, engine: EngineType) -> list[str]:
+    out: list[str] = []
+    for stmt in split_sql_statements(sql, engine):
+        out.extend(_flatten_blocks(stmt))
+    return out
+
+
 def analyze_script_access(sql: str, engine: EngineType) -> ScriptAccess:
     """Analyze a whole script and return the real-table access it requires (+ any denial)."""
-    statements = split_sql_statements(sql, engine)
+    statements = _statements_for_analysis(sql, engine)
     script = ScriptAccess()
     locals_: set[str] = set()
     vars_: dict[str, str] = {}
@@ -270,8 +343,10 @@ def analyze_script_access(sql: str, engine: EngineType) -> ScriptAccess:
             resolved = _resolve_string_expr(sm.group(2), vars_)
             vars_[sm.group(1).lower()] = resolved if resolved is not None else None  # type: ignore[assignment]
 
-        if kw in _EXEC_KEYWORDS:
-            _analyze_dynamic_exec(stmt, engine, {k: v for k, v in vars_.items() if v is not None}, locals_, script)
+        if kw in _ROUTINE_KEYWORDS:
+            _analyze_exec_or_call(
+                stmt, kw, engine, {k: v for k, v in vars_.items() if v is not None}, locals_, script
+            )
             continue
 
         if kw in _PROCEDURAL_KEYWORDS:
@@ -303,3 +378,35 @@ def _strip_to_select(stmt: str) -> str:
     """Return the substring starting at the first SELECT (for cursor/IF embedded selects)."""
     m = re.search(r"\bselect\b", stmt, re.IGNORECASE)
     return stmt[m.start():] if m else stmt
+
+
+# --- stored routine validation (read-only execution authorization) -----------------------
+
+# PostgreSQL/MySQL catalog definitions ARE the body; SQL Server's OBJECT_DEFINITION wraps it in
+# a CREATE PROCEDURE/FUNCTION … AS header that must be stripped before analysis.
+_DOLLAR_BODY_RE = re.compile(r"\$([A-Za-z0-9_]*)\$(.*)\$\1\$", re.DOTALL)
+_TSQL_AS_RE = re.compile(r"\bAS\b", re.IGNORECASE)
+
+
+def _routine_body(definition: str, engine: EngineType) -> str:
+    text = (definition or "").strip()
+    if not text:
+        return ""
+    # PostgreSQL pg_get_functiondef wraps the body in $tag$ … $tag$ (prosrc is already bare).
+    m = _DOLLAR_BODY_RE.search(text)
+    if m:
+        text = m.group(2).strip()
+    # If a full CREATE [OR ALTER] PROCEDURE|FUNCTION … AS header is present (e.g. SQL Server's
+    # OBJECT_DEFINITION), drop it so we analyze the body, not the routine's own DDL.
+    if re.match(r"\s*create\b", text, re.IGNORECASE):
+        m2 = _TSQL_AS_RE.search(text)
+        if m2:
+            text = text[m2.end():]
+    return text
+
+
+def analyze_routine_definition(definition: str, engine: EngineType) -> ScriptAccess:
+    """Analyze a stored routine's body for read-only authorization. Returns the real-table
+    access the body performs (so the caller can require SELECT on each), plus a ``denied_reason``
+    or nested ``routines`` that make it un-authorizable (and therefore deny)."""
+    return analyze_script_access(_routine_body(definition, engine), engine)

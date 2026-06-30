@@ -1,12 +1,33 @@
 /* Phase 8 module styling: grids, trees, editor, tabs, modal, toolbars. */
 
 /* Wrap any wide table so it scrolls inside its own container instead of overflowing the page.
-   Keeps page-level layout intact on small screens. */
+   When placed in a flex column (.view-fill) it fills the remaining height, so the body shows
+   only the rows that fit, headers stay sticky, and a horizontal scrollbar sits at the bottom
+   of the visible area. */
 .table-scroll {
   width: 100%;
   max-width: 100%;
-  overflow-x: auto;
+  overflow: auto;
   -webkit-overflow-scrolling: touch;
+  flex: 1;
+  min-height: 0;
+}
+/* Tables in these scroll containers wrap long cell content (rows auto-grow), with a readable
+   minimum column width preserved by the resize handles / min-width below. */
+.table-scroll .grid-table tbody td {
+  white-space: normal;
+  word-break: break-word;
+  overflow: visible;
+  text-overflow: clip;
+  vertical-align: top;
+  min-width: 80px;
+}
+/* The audit-log fills its panel: filter bar on top, the scrollable table below. */
+audit-log {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 /* Data grid (fallback table) */
@@ -155,6 +176,10 @@
   display: flex;
   align-items: center;
   gap: var(--sp-3);
+  /* Wrap controls onto a second line instead of letting them overflow/clip on narrower
+     desktop & laptop widths (e.g. ~1150px), so the Run button is always visible. */
+  flex-wrap: wrap;
+  row-gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border);
   background: var(--bg-surface);
@@ -274,6 +299,8 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  flex-wrap: wrap;
+  row-gap: var(--sp-2);
 }
 .session-bar .input {
   width: auto;
@@ -532,3 +559,58 @@
 .erd-col-type { color: var(--text-muted); font-family: var(--font-mono); white-space: nowrap; }
 .erd-pk { font-size: 10px; }
 .erd-fk { font-size: 9px; font-weight: 700; color: var(--accent); }
+
+/* Diagram: resizable table-list panel + diagram workspace, context menu */
+diagram-view { display: block; height: 100%; }
+.erd-main { flex: 1; display: flex; min-height: 0; }
+.erd-list {
+  width: 240px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  min-width: 160px;
+}
+.erd-list-head {
+  display: flex; gap: 8px; align-items: center;
+  padding: 8px; border-bottom: 1px solid var(--border);
+}
+.erd-filter { flex: 1; min-width: 0; }
+.erd-list-items { flex: 1; overflow: auto; min-height: 0; }
+.erd-list-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px; cursor: pointer; font-size: var(--fs-sm);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  user-select: none;
+}
+.erd-list-item:hover { background: var(--bg-hover); }
+.erd-list-item .erd-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  border: 1px solid var(--border-strong); flex: none;
+}
+.erd-list-item.on { color: var(--accent); font-weight: 600; }
+.erd-list-item.on .erd-dot { background: var(--accent); border-color: var(--accent); }
+.erd-resizer {
+  width: 6px; flex: none; cursor: col-resize;
+  background: var(--bg-surface); border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border); position: relative;
+}
+.erd-resizer::after {
+  content: ""; position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%); width: 3px; height: 30px;
+  border-radius: 999px; background: var(--border-strong);
+}
+.erd-resizer:hover::after { background: var(--accent); }
+.erd-box.selected { outline: 2px solid var(--accent); outline-offset: 1px; }
+.erd-menu {
+  position: fixed; z-index: 1200; min-width: 210px;
+  background: var(--bg-elevated); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-lg);
+  padding: 4px;
+}
+.erd-menu-item {
+  display: block; width: 100%; text-align: left; padding: 7px 10px;
+  background: none; border: none; color: var(--text-primary);
+  font: inherit; cursor: pointer; border-radius: var(--radius-sm);
+}
+.erd-menu-item:hover { background: var(--accent-soft); }

@@ -247,6 +247,27 @@ class SQLAlchemyAdapter(DatabaseAdapter):
         databases.sort(key=lambda d: d.name)
         return databases
 
+    # SQL returning a routine's definition/body (one ``:name`` param). Set per engine; used to
+    # authorize EXEC/CALL of read-only stored routines.
+    routine_definition_sql: ClassVar[str | None] = None
+
+    async def get_routine_definition(self, name: str) -> str | None:
+        """Fetch a stored routine's source/body from the catalog (for read-only validation).
+
+        Returns ``None`` if the engine doesn't expose it or the routine isn't found."""
+        if not self.routine_definition_sql:
+            return None
+        cleaned = name.replace("[", "").replace("]", "").replace('"', "").replace("`", "")
+        # SQL Server's OBJECT_ID resolves a schema-qualified name; other catalogs key on the
+        # bare routine name.
+        param = cleaned if self.dialect == "mssql" else cleaned.split(".")[-1]
+        try:
+            async with self.acquire() as conn:
+                row = (await conn.execute(text(self.routine_definition_sql), {"name": param})).first()
+        except Exception:  # noqa: BLE001 - treat catalog errors as "cannot verify" (deny upstream)
+            return None
+        return str(row[0]) if row and row[0] is not None else None
+
     async def create_database(self, name: str) -> str:
         """Create a new database on the server and return its name.
 

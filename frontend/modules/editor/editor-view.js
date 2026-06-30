@@ -14,9 +14,10 @@ import "../../components/data-grid.js";
 // Guard against accidentally loading a huge dump into the in-browser editor.
 const MAX_SQL_FILE_BYTES = 8 * 1024 * 1024; // 8 MB
 
-// The current editor text is persisted here so an unsaved query survives navigation and page
-// reloads (restored when the user returns to the editor).
-const DRAFT_KEY = "dbadmin.sql-draft";
+// The current editor text is persisted (per user) so an unsaved query survives navigation and
+// page reloads. Keying by the signed-in user's id keeps drafts private: one user never sees
+// another user's saved query, even on a shared browser.
+const DRAFT_KEY_PREFIX = "dbadmin.sql-draft:";
 // Persisted height (px) of the Monaco editor pane above the editor/results divider.
 const SPLIT_KEY = "dbadmin.editor-split";
 
@@ -51,9 +52,9 @@ export class EditorView extends HTMLElement {
     this._runBtn = this.querySelector("#run");
     this._fileInput = this.querySelector("#file-input");
 
-    // Restore the most recent unsaved query (preserved across navigation / reloads).
+    // Restore this user's most recent unsaved query (preserved across navigation / reloads).
     try {
-      const draft = localStorage.getItem(DRAFT_KEY);
+      const draft = localStorage.getItem(this._draftKey());
       if (draft !== null) this._editor.setValue(draft);
     } catch {
       /* storage unavailable — fall back to the default query */
@@ -151,9 +152,14 @@ export class EditorView extends HTMLElement {
     this._draftTimer = setTimeout(() => this._writeDraft(), 400);
   }
 
+  _draftKey() {
+    const uid = app.auth?.user?.id || app.auth?.user?.email || "anon";
+    return DRAFT_KEY_PREFIX + uid;
+  }
+
   _writeDraft() {
     try {
-      localStorage.setItem(DRAFT_KEY, this._editor.getValue());
+      localStorage.setItem(this._draftKey(), this._editor.getValue());
     } catch {
       /* storage full / unavailable — non-fatal */
     }

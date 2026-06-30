@@ -15,7 +15,7 @@ const ROLES = ["admin", "dba", "developer", "viewer"];
 export class AdminView extends HTMLElement {
   connectedCallback() {
     this.innerHTML = `
-      <div class="view" style="max-width:1100px">
+      <div class="view view-fill">
         <div class="view-header"><h2>Admin</h2>
           <div class="muted">Manage users and review the immutable audit log.</div></div>
         <div class="tabs">
@@ -23,7 +23,7 @@ export class AdminView extends HTMLElement {
           <button class="tab" data-tab="permissions">Permissions</button>
           <button class="tab" data-tab="audit">Audit log</button>
         </div>
-        <div class="panel" id="tabbody" style="padding:0; margin-top:12px"></div>
+        <div class="panel fill" id="tabbody" style="padding:0; margin-top:12px"></div>
       </div>`;
     this._body = this.querySelector("#tabbody");
     this.querySelectorAll(".tab").forEach((t) =>

@@ -110,9 +110,40 @@ def test_unresolvable_dynamic_sql_denied() -> None:
     assert exc.value.code == "ACCESS_DENIED"
 
 
-def test_exec_named_routine_denied_for_non_admin() -> None:
-    with pytest.raises(AuthorizationError):
-        _select_only_policy().enforce_script(MSSQL, "appdb", "EXEC dbo.SomeProcedure;")
+def test_named_routine_returned_for_validation() -> None:
+    # EXEC of a named routine is no longer hard-denied at the policy layer — it's returned so
+    # the query engine can validate the routine's body (read-only over permitted tables).
+    routines = _select_only_policy().enforce_script(MSSQL, "appdb", "EXEC dbo.SomeProcedure;")
+    assert routines == ["dbo.SomeProcedure"]
+
+
+def test_call_routine_returned_for_validation() -> None:
+    routines = _select_only_policy().enforce_script(
+        EngineType.MYSQL, "appdb", "CALL get_report(1);"
+    )
+    assert routines == ["get_report"]
+
+
+def test_read_only_routine_body_is_select_only() -> None:
+    from app.services.sql_script_analyzer import analyze_routine_definition
+
+    access = analyze_routine_definition(
+        "CREATE PROCEDURE usp_test AS BEGIN SELECT * FROM Tutor; END", MSSQL
+    )
+    assert access.denied_reason is None and not access.routines
+    assert {(r.operation, r.table.name) for r in access.requirements} == {
+        (SqlOperation.SELECT, "Tutor")
+    }
+
+
+def test_write_routine_body_detected() -> None:
+    from app.services.sql_script_analyzer import analyze_routine_definition
+
+    access = analyze_routine_definition(
+        "CREATE PROCEDURE usp_w AS BEGIN DELETE FROM Tutor; END", MSSQL
+    )
+    ops = {r.operation for r in access.requirements}
+    assert SqlOperation.DELETE in ops  # not read-only → engine will deny execution
 
 
 def test_real_insert_still_requires_grant() -> None:
