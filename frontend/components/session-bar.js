@@ -39,11 +39,19 @@ export class SessionBar extends HTMLElement {
     this._connections = connections;
     const active = sessionStore.getState().sessionId;
 
+    // Label a session by its connection (server) name so the user can tell which server it is —
+    // e.g. "PostGreSQL_158 (postgresql)" rather than an opaque "postgresql · 1a2b3c4d".
+    const connName = (id) => connections.find((c) => c.id === id)?.name;
+    const sessionLabel = (s) =>
+      connName(s.connection_id)
+        ? `${connName(s.connection_id)} (${s.engine})`
+        : `${s.engine} · ${s.id.slice(0, 8)}`;
     const sessionOpts = sessions
       .map(
         (s) =>
-          `<option value="${s.id}" ${s.id === active ? "selected" : ""}>
-            ${escapeHtml(s.engine)} · ${s.id.slice(0, 8)}</option>`
+          `<option value="${s.id}" ${s.id === active ? "selected" : ""}>${escapeHtml(
+            sessionLabel(s)
+          )}</option>`
       )
       .join("");
     const connOpts = connections

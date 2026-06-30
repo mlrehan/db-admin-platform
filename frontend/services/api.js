@@ -9,8 +9,10 @@ export class Api {
   }
 
   // --- connections ---
-  listConnections() {
-    return this.http.get("/connections");
+  listConnections({ allOwners = false } = {}) {
+    // allOwners (admin only) lists across every owner — used to resolve connection names for
+    // the audit log; non-admins simply get their own + shared connections.
+    return this.http.get(`/connections${allOwners ? "?all_owners=true" : ""}`);
   }
   createConnection(payload) {
     return this.http.post("/connections", payload);

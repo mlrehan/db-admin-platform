@@ -16,6 +16,7 @@ const EXPORT_CAP = 20000; // safety ceiling for a single export
 const COLUMNS = [
   { key: "created_at", label: "Time", get: (l) => new Date(l.created_at).toLocaleString() },
   { key: "user_email", label: "User", get: (l) => l.user_email || "—" },
+  { key: "connection_name", label: "Server", get: (l) => l.connection_name || "—" },
   { key: "ip_address", label: "IP address", get: (l) => l.ip_address || "—" },
   { key: "engine", label: "Engine", get: (l) => l.engine || "" },
   { key: "category", label: "Category", get: (l) => l.category || "" },
@@ -29,6 +30,9 @@ export class AuditLog extends HTMLElement {
   connectedCallback() {
     this.innerHTML = `
       <div class="row" style="padding:12px 16px; border-bottom:1px solid var(--border); gap:8px; flex-wrap:wrap">
+        <select class="input" id="f-user" style="width:auto" hidden>
+          <option value="">All users</option>
+        </select>
         <select class="input" id="f-cat" style="width:auto">
           <option value="">All categories</option>
           <option value="read">read</option><option value="write">write</option>
@@ -46,13 +50,46 @@ export class AuditLog extends HTMLElement {
       <div id="auditrows" class="table-scroll"><div class="placeholder">Loading…</div></div>`;
 
     this._rowsBox = this.querySelector("#auditrows");
+    this._connNames = new Map();
     this.querySelector("#reload").addEventListener("click", () => this._load());
-    ["f-cat", "f-dest", "f-fail", "f-since", "f-until"].forEach((id) =>
+    ["f-user", "f-cat", "f-dest", "f-fail", "f-since", "f-until"].forEach((id) =>
       this.querySelector("#" + id).addEventListener("change", () => this._load())
     );
     this.querySelector("#export-csv").addEventListener("click", () => this._export("csv"));
     this.querySelector("#export-xls").addEventListener("click", () => this._export("xls"));
+    this._init();
+  }
+
+  // Resolve connection (server) names, and — for admins — populate the "filter by user" select.
+  async _init() {
+    const isAdmin = app.auth?.user?.role === "admin";
+    try {
+      const conns = await app.api.listConnections({ allOwners: isAdmin });
+      (conns || []).forEach((c) => this._connNames.set(c.id, c.name));
+    } catch {
+      /* server-name column is best-effort */
+    }
+    if (isAdmin) {
+      try {
+        const users = await app.api.listUsers();
+        const sel = this.querySelector("#f-user");
+        sel.innerHTML =
+          '<option value="">All users</option>' +
+          users.map((u) => `<option value="${u.id}">${escapeHtml(u.email)}</option>`).join("");
+        sel.hidden = false;
+      } catch {
+        /* user filter is admin-only and optional */
+      }
+    }
     this._load();
+  }
+
+  // Attach the resolved connection name to each row (for the Server column + exports).
+  _enrich(logs) {
+    logs.forEach((l) => {
+      l.connection_name = this._connNames.get(l.connection_id) || "";
+    });
+    return logs;
   }
 
   disconnectedCallback() {
@@ -61,6 +98,8 @@ export class AuditLog extends HTMLElement {
 
   _filters() {
     const f = {};
+    const user = this.querySelector("#f-user")?.value;
+    if (user) f.user_id = user; // admin-only; ignored/forced server-side for non-admins
     const cat = this.querySelector("#f-cat").value;
     if (cat) f.category = cat;
     if (this.querySelector("#f-dest").checked) f.destructive = true;
@@ -77,6 +116,7 @@ export class AuditLog extends HTMLElement {
     return `<tr>
       <td class="muted" style="white-space:nowrap">${escapeHtml(new Date(l.created_at).toLocaleString())}</td>
       <td>${escapeHtml(l.user_email || "—")}</td>
+      <td>${escapeHtml(l.connection_name || "—")}</td>
       <td class="mono">${escapeHtml(l.ip_address || "—")}</td>
       <td class="muted">${escapeHtml(l.engine || "")}</td>
       <td><span class="badge ${cat}">${escapeHtml(l.category || "")}</span>${l.destructive ? ' <span class="badge cat-ddl">⚠</span>' : ""}</td>
@@ -94,7 +134,7 @@ export class AuditLog extends HTMLElement {
     this._rowsBox.innerHTML = `<div class="placeholder">Loading…</div>`;
     let logs;
     try {
-      logs = await app.api.listAuditLogs({ ...this._filters(), limit: PAGE_SIZE, offset: 0 });
+      logs = this._enrich(await app.api.listAuditLogs({ ...this._filters(), limit: PAGE_SIZE, offset: 0 }));
     } catch (err) {
       this._rowsBox.innerHTML = `<div class="placeholder">${escapeHtml(err.message)}</div>`;
       return;
@@ -136,11 +176,11 @@ export class AuditLog extends HTMLElement {
     const body = this.querySelector("#auditbody");
     if (sentinel) sentinel.textContent = "Loading more…";
     try {
-      const logs = await app.api.listAuditLogs({
+      const logs = this._enrich(await app.api.listAuditLogs({
         ...this._filters(),
         limit: PAGE_SIZE,
         offset: this._offset,
-      });
+      }));
       if (body && logs.length) body.insertAdjacentHTML("beforeend", logs.map((l) => this._row(l)).join(""));
       this._offset += logs.length;
       if (logs.length < PAGE_SIZE) {
@@ -167,7 +207,7 @@ export class AuditLog extends HTMLElement {
         limit: EXPORT_PAGE,
         offset,
       });
-      out.push(...page);
+      out.push(...this._enrich(page));
       offset += page.length;
       if (page.length < EXPORT_PAGE || out.length >= EXPORT_CAP) break;
     }
