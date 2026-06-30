@@ -80,7 +80,7 @@ export class AuditLog extends HTMLElement {
       <td class="mono">${escapeHtml(l.ip_address || "—")}</td>
       <td class="muted">${escapeHtml(l.engine || "")}</td>
       <td><span class="badge ${cat}">${escapeHtml(l.category || "")}</span>${l.destructive ? ' <span class="badge cat-ddl">⚠</span>' : ""}</td>
-      <td class="mono" style="max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" title="${escapeHtml(l.statement)}">${escapeHtml(l.statement)}</td>
+      <td class="mono stmt-cell" style="min-width:280px; max-width:560px; white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere; overflow:visible; text-overflow:clip; user-select:text">${escapeHtml(l.statement)}</td>
       <td>${l.success ? '<span style="color:var(--success)">ok</span>' : `<span style="color:var(--danger)">${escapeHtml(l.error_code || "fail")}</span>`}</td>
       <td class="mono">${l.row_count ?? l.rows_affected ?? ""}</td>
       <td class="mono">${Math.round(l.duration_ms)}</td></tr>`;
