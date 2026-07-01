@@ -41,12 +41,14 @@ export class EditorView extends HTMLElement {
           <button class="rtab active" data-rtab="results">Results</button>
           <button class="rtab" data-rtab="messages">Messages</button>
         </div>
-        <data-grid id="grid"></data-grid>
+        <div class="results-area" id="results">
+          <div class="grid-empty muted">No results yet.</div>
+        </div>
         <div class="messages-panel hidden" id="messages"></div>
       </div>`;
 
     this._editor = this.querySelector("code-editor");
-    this._grid = this.querySelector("#grid");
+    this._results = this.querySelector("#results");
     this._messages = this.querySelector("#messages");
     this._status = this.querySelector("#status");
     this._runBtn = this.querySelector("#run");
@@ -213,8 +215,17 @@ export class EditorView extends HTMLElement {
     this.querySelectorAll(".rtab").forEach((t) =>
       t.classList.toggle("active", t.dataset.rtab === tab)
     );
-    this._grid.classList.toggle("hidden", tab !== "results");
+    this._results.classList.toggle("hidden", tab !== "results");
     this._messages.classList.toggle("hidden", tab !== "messages");
+  }
+
+  // Show/clear a centered busy overlay while a script runs (the single grid used to own this).
+  _setBusy(on, text = "Executing…") {
+    if (on) {
+      this._results.innerHTML =
+        `<div class="grid-busy" style="position:static;flex:1">` +
+        `<div class="spinner"></div><div class="muted">${escapeHtml(text)}</div></div>`;
+    }
   }
 
   async _run() {
@@ -232,7 +243,7 @@ export class EditorView extends HTMLElement {
     this._runBtn.innerHTML = `<span class="spinner sm"></span> Running…`;
     this._status.innerHTML = `<span class="muted">Executing${selected ? " selection" : ""}…</span>`;
     this._selectTab("results");
-    this._grid.setBusy(true, `Executing${selected ? " selection" : ""}…`);
+    this._setBusy(true, `Executing${selected ? " selection" : ""}…`);
     const start = performance.now();
     try {
       const res = await app.api.executeScript(sessionId, sql);
@@ -244,7 +255,7 @@ export class EditorView extends HTMLElement {
         bus.emit(Events.METADATA_CHANGED, { sessionId });
       }
     } catch (err) {
-      this._grid.setBusy(false);
+      this._results.innerHTML = `<div class="grid-empty muted">—</div>`;
       this._status.innerHTML = `<span style="color:var(--danger)">✕ ${escapeHtml(err.message)}</span>`;
     } finally {
       this._runBtn.disabled = false;
@@ -254,12 +265,32 @@ export class EditorView extends HTMLElement {
 
   _render(res, ms) {
     const stmts = res.statements || [];
-    // Show the last statement that returned rows in the grid.
-    const lastRows = [...stmts].reverse().find((s) => s.success && s.returns_rows);
-    if (lastRows) {
-      this._grid.setData(lastRows.columns, lastRows.rows);
+    // Render EVERY result set the script produced, stacked like Microsoft SSMS. A single set
+    // fills the pane; multiple sets each get a bounded, individually-scrollable block labelled
+    // "Result N". Result sets produced before a mid-script error are still shown (SSMS-style).
+    const resultSets = stmts.filter((s) => s.success && s.returns_rows);
+    this._results.innerHTML = "";
+    if (resultSets.length) {
+      const multi = resultSets.length > 1;
+      resultSets.forEach((s, i) => {
+        const block = document.createElement("div");
+        block.className = `result-block ${multi ? "multi" : "single"}`;
+        if (multi) {
+          const label = document.createElement("div");
+          label.className = "result-label";
+          label.innerHTML =
+            `<strong>Result ${i + 1}</strong>` +
+            `<span class="muted">· ${s.row_count} row${s.row_count === 1 ? "" : "s"}` +
+            `${s.truncated ? " (truncated)" : ""}</span>`;
+          block.appendChild(label);
+        }
+        const grid = document.createElement("data-grid");
+        block.appendChild(grid);
+        this._results.appendChild(block); // connect before setData so it renders
+        grid.setData(s.columns, s.rows);
+      });
     } else {
-      this._grid.setData([], []);
+      this._results.innerHTML = `<div class="grid-empty muted">No result set returned.</div>`;
     }
 
     // Messages: one line per statement.
@@ -273,16 +304,21 @@ export class EditorView extends HTMLElement {
       this._status.innerHTML =
         `<span class="badge cat-ddl">error</span> ` +
         `<span style="color:var(--danger)">✕ Statement ${stmts.indexOf(failed) + 1}: ${escapeHtml(failed.error || failed.error_code)}</span>`;
-      this._selectTab("messages");
+      // If the script still produced result sets before failing, keep them visible (SSMS shows
+      // the results plus the error). Otherwise focus the Messages tab.
+      this._selectTab(resultSets.length ? "results" : "messages");
       // A permission denial is the most actionable error — surface it as a toast too so the
       // user clearly sees they're not allowed to run that kind of statement.
       if (failed.error_code === "ACCESS_DENIED") {
         bus.emit(Events.TOAST, { message: failed.error || "Not permitted", kind: "error" });
       }
     } else {
-      const rowInfo = lastRows ? ` · ${lastRows.row_count} rows` : "";
+      const totalRows = resultSets.reduce((n, s) => n + s.row_count, 0);
+      const rowInfo = resultSets.length
+        ? ` · ${resultSets.length} result set${resultSets.length === 1 ? "" : "s"}, ${totalRows} row${totalRows === 1 ? "" : "s"}`
+        : "";
       this._status.innerHTML = `<span style="color:var(--success)">✓ ${okCount} statement${okCount === 1 ? "" : "s"} in ${ms} ms${rowInfo}</span>`;
-      this._selectTab(lastRows ? "results" : "messages");
+      this._selectTab(resultSets.length ? "results" : "messages");
     }
   }
 

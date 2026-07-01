@@ -49,6 +49,12 @@ _EXEC_KEYWORDS = {"exec", "execute"}
 # of the routine body, done later with catalog access.
 _ROUTINE_KEYWORDS = {"exec", "execute", "call"}
 _NAMED_ROUTINE_RE = re.compile(r"^\s*(?:exec(?:ute)?|call)\s+([\[\]\w.\"`]+)", re.IGNORECASE)
+# sp_executesql is SQL Server's parameterized dynamic SQL — its FIRST argument is the SQL text
+# (a @variable or an N'…' literal). Treated like dynamic SQL, not a fetchable routine.
+_SP_EXECUTESQL_RE = re.compile(
+    r"^\s*exec(?:ute)?\s+(?:sys\.)?sp_executesql\s+(@[A-Za-z_]\w*|N?'(?:[^']|'')*')",
+    re.IGNORECASE,
+)
 
 # A table reference is session-local (no grant needed) if its name is a temp/var or was
 # created as a temporary object earlier in the script.
@@ -224,14 +230,27 @@ def _analyze_exec_or_call(
     stmt: str, kw: str, engine: EngineType, vars_: dict[str, str], locals_: set[str],
     script: ScriptAccess,
 ) -> None:
-    """Route an EXEC/CALL statement: validate read-only dynamic SQL inline, or record a named
-    routine for later body-based authorization (with catalog access)."""
-    if kw in _EXEC_KEYWORDS and _EXEC_DYNAMIC_RE.match(stmt):
-        _analyze_dynamic_exec(stmt, engine, vars_, locals_, script)
-        return
+    """Route an EXEC/CALL statement: validate read-only dynamic SQL (incl. sp_executesql)
+    inline, or record a named routine for later body-based authorization (catalog access)."""
+    if kw in _EXEC_KEYWORDS:
+        sp = _SP_EXECUTESQL_RE.match(stmt)
+        if sp:
+            _validate_dynamic_token(sp.group(1), engine, vars_, locals_, script)
+            return
+        if _EXEC_DYNAMIC_RE.match(stmt):
+            _analyze_dynamic_exec(stmt, engine, vars_, locals_, script)
+            return
     named = _NAMED_ROUTINE_RE.match(stmt)
     if named:
-        script.routines.append(_clean_routine_name(named.group(1)))
+        name = _clean_routine_name(named.group(1))
+        if name.lower().endswith("sp_executesql"):
+            # sp_executesql whose SQL-string arg we couldn't capture — can't prove read-only.
+            script.denied_reason = (
+                "Dynamic SQL (sp_executesql) could not be statically verified as read-only "
+                "and was denied."
+            )
+            return
+        script.routines.append(name)
     else:
         script.denied_reason = "Could not identify the routine being executed; execution denied."
 
@@ -246,7 +265,14 @@ def _analyze_dynamic_exec(
             "Dynamic SQL could not be statically verified as read-only and was denied."
         )
         return
-    token = m.group(1)
+    _validate_dynamic_token(m.group(1), engine, vars_, locals_, script)
+
+
+def _validate_dynamic_token(
+    token: str, engine: EngineType, vars_: dict[str, str], locals_: set[str], script: ScriptAccess
+) -> None:
+    """Resolve a dynamic-SQL token (a @variable or a string literal) and allow it only if it is a
+    read-only SELECT over tables the caller may read; otherwise set a precise denial."""
     if token.startswith("@"):
         resolved = vars_.get(token.lower())
     else:  # a literal 'string'

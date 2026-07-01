@@ -478,9 +478,13 @@
   .code-editor {
     height: 32vh;
   }
-  /* Give the results grid and messages real, scrollable height on mobile. */
-  .editor-layout .data-grid {
+  /* Give the results pane and messages real, scrollable height on mobile. */
+  .editor-layout .results-area {
     min-height: 55vh;
+  }
+  /* Stacked result blocks shrink a little on phones so more than one is reachable. */
+  .editor-layout .result-block.multi {
+    height: 48vh;
   }
   .editor-layout .messages-panel {
     min-height: 45vh;

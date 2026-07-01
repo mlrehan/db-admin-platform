@@ -385,25 +385,38 @@ class SQLAlchemyAdapter(DatabaseAdapter):
     async def run_script(self, sql: str, *, max_rows: int = 1000) -> ScriptRun:
         start = time.perf_counter()
         if self.script_mode == "batch":
-            result_sets, messages = await self._run_script_batch(sql, max_rows)
+            result_sets, messages, error = await self._run_script_batch(sql, max_rows)
         else:
-            result_sets, messages = await self._run_script_sequential(sql, max_rows)
+            result_sets, messages, error = await self._run_script_sequential(sql, max_rows)
         elapsed = (time.perf_counter() - start) * 1000
-        return ScriptRun(result_sets=result_sets, messages=messages, execution_ms=round(elapsed, 3))
+        return ScriptRun(
+            result_sets=result_sets, messages=messages, execution_ms=round(elapsed, 3), error=error
+        )
+
+    @staticmethod
+    def _script_error(exc: Exception) -> str:
+        # Prefer the driver's own message (SQLAlchemy wraps it in .orig).
+        message = str(getattr(exc, "orig", None) or exc).strip()
+        return message or exc.__class__.__name__
 
     async def _run_script_sequential(
         self, sql: str, max_rows: int
-    ) -> tuple[list[ScriptResultSet], list[str]]:
+    ) -> tuple[list[ScriptResultSet], list[str], str | None]:
         from app.services.sql_guard import split_sql_statements  # local: avoid layering cycle
 
         result_sets: list[ScriptResultSet] = []
         messages: list[str] = []
+        error: str | None = None
         async with self.acquire() as conn:
             # AUTOCOMMIT so each statement commits on the shared connection (temp tables created
             # this way persist for the connection's lifetime, just like a real session).
             run = await conn.execution_options(isolation_level="AUTOCOMMIT")
             for stmt in split_sql_statements(sql, self.engine):
-                result = await run.exec_driver_sql(stmt)
+                try:
+                    result = await run.exec_driver_sql(stmt)
+                except Exception as exc:  # noqa: BLE001 - report + keep prior result sets (SSMS-like)
+                    error = self._script_error(exc)
+                    break
                 if result.returns_rows:
                     fetched = result.fetchmany(max_rows + 1)
                     truncated = len(fetched) > max_rows
@@ -414,15 +427,18 @@ class SQLAlchemyAdapter(DatabaseAdapter):
                     affected = self._rows_affected(result.rowcount)
                     if affected is not None:
                         messages.append(f"{affected} row(s) affected")
-        return result_sets, messages
+        return result_sets, messages, error
 
     async def _run_script_batch(
         self, sql: str, max_rows: int
-    ) -> tuple[list[ScriptResultSet], list[str]]:
+    ) -> tuple[list[ScriptResultSet], list[str], str | None]:
         """Send the whole script as one batch and collect every result set via the driver's
-        native ``nextset()`` (SQL Server / MySQL async DBAPI cursors support this)."""
+        native ``nextset()`` (SQL Server / MySQL async DBAPI cursors support this). On a
+        mid-batch error the result sets already produced are returned along with the error, so
+        the editor shows the results plus the failure — just like SSMS."""
         result_sets: list[ScriptResultSet] = []
         messages: list[str] = []
+        error: str | None = None
         async with self.acquire() as conn:
             autoconn = await conn.execution_options(isolation_level="AUTOCOMMIT")
             raw = await autoconn.get_raw_connection()
@@ -442,9 +458,14 @@ class SQLAlchemyAdapter(DatabaseAdapter):
                             messages.append(f"{affected} row(s) affected")
                     if not await cursor.nextset():
                         break
+            except Exception as exc:  # noqa: BLE001 - keep the result sets gathered before the error
+                error = self._script_error(exc)
             finally:
-                await cursor.close()
-        return result_sets, messages
+                try:
+                    await cursor.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        return result_sets, messages, error
 
     async def stream(
         self,

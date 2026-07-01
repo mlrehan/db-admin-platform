@@ -261,6 +261,46 @@ audit-log {
   color: var(--text-primary);
   border-bottom-color: var(--accent);
 }
+/* Results pane holding one or more result-set grids, stacked SSMS-style. */
+.results-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+.results-area.hidden {
+  display: none;
+}
+.result-block {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+/* A single result set fills the whole pane (unchanged behaviour). */
+.result-block.single {
+  flex: 1;
+}
+/* Multiple result sets: each gets a bounded, individually-scrollable block, and the pane
+   scrolls between them — exactly like SSMS's stacked "Results" grids. */
+.result-block.multi {
+  flex: none;
+  height: 320px;
+  border-bottom: 2px solid var(--border-strong);
+}
+.result-label {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 4px var(--sp-3);
+  font-size: var(--fs-sm);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+}
+.result-block .data-grid {
+  min-height: 0;
+}
 .messages-panel {
   flex: 1;
   overflow: auto;

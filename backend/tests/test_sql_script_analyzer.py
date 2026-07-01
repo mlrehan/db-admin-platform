@@ -156,3 +156,61 @@ def test_real_insert_still_requires_grant() -> None:
 def test_admin_bypasses_script_enforcement() -> None:
     admin = AccessPolicy(is_admin=True, has_grants=False, grants=())
     admin.enforce_script(MSSQL, "appdb", "DROP TABLE Tutor; DELETE FROM Student;")  # no raise
+
+
+# --- sp_executesql: read-only parameterised dynamic SQL is allowed, writes denied -----------
+
+SP_EXECUTESQL_SCRIPT = """
+DECLARE @SQLString nvarchar(500);
+DECLARE @ParmDefinition nvarchar(500);
+DECLARE @IntVariable int;
+SET @SQLString = N'SELECT BusinessEntityID, NationalIDNumber, JobTitle FROM Employee WHERE BusinessEntityID = @BusinessEntityID';
+SET @ParmDefinition = N'@BusinessEntityID int';
+SET @IntVariable = 197;
+EXECUTE sp_executesql @SQLString, @ParmDefinition, @BusinessEntityID = @IntVariable;
+"""
+
+
+def test_sp_executesql_read_only_allowed_with_select() -> None:
+    # sp_executesql is dynamic SQL, not a named routine — its SQL-string argument is resolved
+    # and enforced. A SELECT statement must be allowed for a SELECT-only user.
+    access = analyze_script_access(SP_EXECUTESQL_SCRIPT, MSSQL)
+    assert access.denied_reason is None
+    assert not access.routines  # NOT treated as a routine needing body lookup
+    assert (SqlOperation.SELECT, "Employee") in {
+        (r.operation, r.table.name if r.table else None) for r in access.requirements
+    }
+    _select_only_policy().enforce_script(MSSQL, "appdb", SP_EXECUTESQL_SCRIPT)  # no raise
+
+
+def test_sp_executesql_write_string_denied() -> None:
+    script = (
+        "DECLARE @s nvarchar(200);"
+        " SET @s = N'DELETE FROM Tutor';"
+        " EXECUTE sp_executesql @s;"
+    )
+    with pytest.raises(AuthorizationError) as exc:
+        _select_only_policy().enforce_script(MSSQL, "appdb", script)
+    assert exc.value.code == "ACCESS_DENIED"
+
+
+def test_sp_executesql_unresolvable_denied() -> None:
+    # The SQL-string argument is never statically assigned → cannot prove read-only → deny.
+    with pytest.raises(AuthorizationError):
+        _select_only_policy().enforce_script(MSSQL, "appdb", "EXEC sp_executesql @s;")
+
+
+def test_multiple_drop_temp_tables_allowed_with_select() -> None:
+    # Several DROP TABLE #temp statements target session-local temp tables — no grant needed.
+    script = (
+        "SELECT * INTO #a FROM Tutor;"
+        " SELECT * INTO #b FROM Student;"
+        " SELECT * FROM #a; SELECT * FROM #b;"
+        " DROP TABLE #a; DROP TABLE #b;"
+    )
+    access = analyze_script_access(script, MSSQL)
+    assert access.denied_reason is None
+    tables = {r.table.name for r in access.requirements if r.table}
+    assert "Tutor" in tables and "Student" in tables
+    assert not any(t.startswith("#") for t in tables)
+    _select_only_policy().enforce_script(MSSQL, "appdb", script)  # no raise

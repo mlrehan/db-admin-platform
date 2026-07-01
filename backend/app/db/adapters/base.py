@@ -111,11 +111,14 @@ class ScriptResultSet:
 @dataclass(frozen=True)
 class ScriptRun:
     """Outcome of running a whole script as one session: every result set, plus row-count
-    messages from non-returning statements (INSERT/UPDATE/DDL/…)."""
+    messages from non-returning statements (INSERT/UPDATE/DDL/…). ``error`` is set when a
+    statement failed mid-script — the result sets produced *before* the failure are still
+    returned (SSMS-style: show the results plus the error)."""
 
     result_sets: list[ScriptResultSet]
     messages: list[str]
     execution_ms: float
+    error: str | None = None
 
 
 class DatabaseAdapter(ABC):

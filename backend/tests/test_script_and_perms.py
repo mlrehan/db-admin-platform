@@ -127,6 +127,47 @@ async def test_script_runs_in_one_session_returns_all_sets(
     assert len(body["statements"]) == 3
 
 
+async def test_script_returns_multiple_result_sets(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    # Two SELECTs → two distinct row-returning outcomes (SSMS-style multi result set), each a
+    # separate grid on the frontend.
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    _, sid = await _admin_session(client, admin, row_count=2)
+    resp = await client.post(
+        f"/api/v1/sessions/{sid}/script", headers=admin,
+        json={"sql": "SELECT * FROM t; SELECT * FROM u"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is True
+    row_sets = [s for s in body["statements"] if s["returns_rows"]]
+    assert len(row_sets) == 2
+    assert all(s["row_count"] == 2 for s in row_sets)
+
+
+async def test_script_returns_partial_results_before_error(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    # A statement fails mid-script: the result sets produced before it are still returned
+    # (SSMS-style), plus a failed outcome carrying the error, and success is False.
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    _, sid = await _admin_session(client, admin, row_count=2)
+    resp = await client.post(
+        f"/api/v1/sessions/{sid}/script", headers=admin,
+        json={"sql": "SELECT * FROM t; SELECT * FROM u; RAISE_ERROR now; SELECT 1"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    row_sets = [s for s in body["statements"] if s["returns_rows"]]
+    assert len(row_sets) == 2  # the two SELECTs before the failure are preserved
+    failed = [s for s in body["statements"] if not s["success"]]
+    assert len(failed) == 1
+    assert "boom" in failed[0]["error"]
+    assert failed[0]["error_code"] == "QUERY_EXECUTION_ERROR"
+
+
 async def test_script_denied_as_a_unit_before_execution(
     client: AsyncClient, seed_users, fake_pg
 ) -> None:

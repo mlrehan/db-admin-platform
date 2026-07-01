@@ -125,7 +125,13 @@ class FakeAdapter(DatabaseAdapter):
 
         result_sets: list[ScriptResultSet] = []
         messages: list[str] = []
+        error: str | None = None
         for stmt in split_sql_statements(sql, self.engine):
+            # Simulate a mid-script failure: the result sets produced *before* it are kept
+            # (SSMS-style partial results) and ``error`` is reported.
+            if "raise_error" in stmt.lower():
+                error = 'relation "boom" does not exist'
+                break
             if self._returns_rows(stmt):
                 total = int(self._config.options.get("row_count", 3))
                 all_rows = self._synth_rows(total)
@@ -138,7 +144,9 @@ class FakeAdapter(DatabaseAdapter):
                 )
             else:
                 messages.append(f"{int(self._config.options.get('affected', 1))} row(s) affected")
-        return ScriptRun(result_sets=result_sets, messages=messages, execution_ms=0.5)
+        return ScriptRun(
+            result_sets=result_sets, messages=messages, execution_ms=0.5, error=error
+        )
 
     async def execute(
         self,

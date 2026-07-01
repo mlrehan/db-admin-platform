@@ -300,11 +300,14 @@ class QueryEngine:
 
         total_rows = sum(len(rs.rows) for rs in run.result_sets)
         await self._audit_event(
-            user, session, analysis, started, success=True, row_count=total_rows,
+            user, session, analysis, started, success=run.error is None, row_count=total_rows,
+            error_code="QUERY_EXECUTION_ERROR" if run.error else None, error=run.error,
         )
 
         # Map each result set to a row-returning outcome and each row-count to a message
-        # outcome, so the editor shows the final result set plus all others and messages.
+        # outcome, so the editor shows EVERY result set (SSMS-style) plus messages. If the run
+        # errored mid-script, the result sets produced before the error are still returned,
+        # followed by a failed outcome carrying the error.
         outcomes: list[StatementOutcome] = []
         for rs in run.result_sets:
             outcomes.append(
@@ -325,7 +328,17 @@ class QueryEngine:
                     error_code=None, error=None,
                 )
             )
-        if not outcomes:  # script ran but produced no rows and no row-count (e.g. pure DDL)
+        if run.error:
+            outcomes.append(
+                StatementOutcome(
+                    sql=sql, success=False, returns_rows=False, columns=[], rows=[],
+                    row_count=0, rows_affected=None, execution_ms=run.execution_ms,
+                    truncated=False, category=analysis.category.value,
+                    destructive=analysis.destructive,
+                    error_code="QUERY_EXECUTION_ERROR", error=run.error,
+                )
+            )
+        elif not outcomes:  # ran cleanly but produced no rows / row-count (e.g. pure DDL)
             outcomes.append(
                 StatementOutcome(
                     sql=sql, success=True, returns_rows=False, columns=[], rows=[],
@@ -334,7 +347,7 @@ class QueryEngine:
                     destructive=analysis.destructive, error_code=None, error=None,
                 )
             )
-        return ScriptResult(statements=outcomes, success=True)
+        return ScriptResult(statements=outcomes, success=run.error is None)
 
     @staticmethod
     def _classify_error(exc: Exception) -> tuple[str, str]:
