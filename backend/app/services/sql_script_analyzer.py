@@ -339,10 +339,65 @@ def _flatten_blocks(stmt: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def _strip_comments(sql: str, engine: EngineType) -> str:
+    """Remove ``--`` / ``/* */`` (and ``#`` for MySQL) comments while copying string, identifier
+    and dollar-quoted literals verbatim. The ^-anchored keyword/SET/EXEC regexes below must see
+    the real statement text even when a comment precedes it (e.g. ``/* … */ SET @sql = …`` or a
+    comment glued in front of ``EXEC``); otherwise the SET value is never captured and a
+    perfectly read-only ``sp_executesql`` batch is wrongly denied."""
+    hash_comment = engine == EngineType.MYSQL
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        two = sql[i : i + 2]
+        if two == "--" or (ch == "#" and hash_comment):
+            j = sql.find("\n", i)
+            if j == -1:
+                break
+            out.append("\n")  # keep the newline so surrounding tokens don't glue together
+            i = j + 1
+            continue
+        if two == "/*":
+            j = sql.find("*/", i + 2)
+            out.append(" ")  # a space stands in for the removed block comment
+            i = n if j == -1 else j + 2
+            continue
+        if ch in ("'", '"', "`"):  # copy a string/identifier literal verbatim
+            q = ch
+            out.append(ch)
+            i += 1
+            while i < n:
+                out.append(sql[i])
+                if sql[i] == q:
+                    if q == "'" and i + 1 < n and sql[i + 1] == "'":
+                        out.append(sql[i + 1])
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "$":  # PostgreSQL dollar-quoted body — copy verbatim
+            m = re.match(r"\$[A-Za-z0-9_]*\$", sql[i:])
+            if m:
+                tag = m.group(0)
+                j = sql.find(tag, i + len(tag))
+                end = n if j == -1 else j + len(tag)
+                out.append(sql[i:end])
+                i = end
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _statements_for_analysis(sql: str, engine: EngineType) -> list[str]:
     out: list[str] = []
     for stmt in split_sql_statements(sql, engine):
-        out.extend(_flatten_blocks(stmt))
+        cleaned = _strip_comments(stmt, engine).strip()
+        if cleaned:
+            out.extend(_flatten_blocks(cleaned))
     return out
 
 

@@ -210,6 +210,49 @@ def test_sp_executesql_multiline_two_executions_allowed() -> None:
     _select_only_policy().enforce_script(MSSQL, "appdb", script)  # no raise
 
 
+def test_sp_executesql_with_block_comments_allowed() -> None:
+    # Block comments before SET / EXEC used to break variable capture (the ^-anchored regexes
+    # never saw the SET), wrongly denying a read-only batch. Comments must be stripped first.
+    script = """
+    DECLARE @IntVariable INT;
+    DECLARE @SQLString NVARCHAR(500);
+    DECLARE @ParmDefinition NVARCHAR(500);
+
+    /* Build the SQL string one time.*/
+    SET @SQLString =
+         N'SELECT BusinessEntityID, NationalIDNumber, JobTitle, LoginID
+           FROM HumanResources.Employee
+           WHERE BusinessEntityID = @BusinessEntityID';
+    SET @ParmDefinition = N'@BusinessEntityID tinyint';
+    /* Execute the string with the first parameter value. */
+    SET @IntVariable = 197;
+    EXECUTE sp_executesql @SQLString, @ParmDefinition,
+                          @BusinessEntityID = @IntVariable;
+    /* Execute the same string with the second parameter value. */
+    SET @IntVariable = 109;
+    EXECUTE sp_executesql @SQLString, @ParmDefinition,
+                          @BusinessEntityID = @IntVariable;
+    """
+    access = analyze_script_access(script, MSSQL)
+    assert access.denied_reason is None
+    assert (SqlOperation.SELECT, "Employee") in {
+        (r.operation, r.table.name if r.table else None) for r in access.requirements
+    }
+    _select_only_policy().enforce_script(MSSQL, "appdb", script)  # no raise
+
+
+def test_comment_cannot_hide_a_write() -> None:
+    # A write commented onto a statement must still be detected once comments are stripped:
+    # here the real DELETE (not the commented one) must be caught.
+    script = "SELECT * FROM Tutor; /* harmless note */ DELETE FROM Student; -- cleanup"
+    with pytest.raises(AuthorizationError) as exc:
+        _select_only_policy().enforce_script(MSSQL, "appdb", script)
+    assert exc.value.code == "ACCESS_DENIED"
+    # And a write *inside* a comment must NOT create a spurious requirement/denial.
+    ok = "SELECT * FROM Tutor; /* DELETE FROM Student */ SELECT * FROM StatusLookup;"
+    _select_only_policy().enforce_script(MSSQL, "appdb", ok)  # no raise
+
+
 def test_sp_executesql_write_string_denied() -> None:
     script = (
         "DECLARE @s nvarchar(200);"
