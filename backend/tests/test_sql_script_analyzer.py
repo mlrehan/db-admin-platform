@@ -183,6 +183,33 @@ def test_sp_executesql_read_only_allowed_with_select() -> None:
     _select_only_policy().enforce_script(MSSQL, "appdb", SP_EXECUTESQL_SCRIPT)  # no raise
 
 
+def test_sp_executesql_multiline_two_executions_allowed() -> None:
+    # The AdventureWorks docs sample: a multi-line N'…' SQL string, schema-qualified table, a
+    # parameter definition, and the SAME string executed twice with different parameter values.
+    # A SELECT-only user must be able to run the whole batch.
+    script = """
+    DECLARE @IntVariable INT;
+    DECLARE @SQLString NVARCHAR(500);
+    DECLARE @ParmDefinition NVARCHAR(500);
+    SET @SQLString =
+         N'SELECT BusinessEntityID, NationalIDNumber, JobTitle, LoginID
+           FROM HumanResources.Employee
+           WHERE BusinessEntityID = @BusinessEntityID';
+    SET @ParmDefinition = N'@BusinessEntityID tinyint';
+    SET @IntVariable = 197;
+    EXECUTE sp_executesql @SQLString, @ParmDefinition, @BusinessEntityID = @IntVariable;
+    SET @IntVariable = 109;
+    EXECUTE sp_executesql @SQLString, @ParmDefinition, @BusinessEntityID = @IntVariable;
+    """
+    access = analyze_script_access(script, MSSQL)
+    assert access.denied_reason is None
+    assert not access.routines
+    assert (SqlOperation.SELECT, "Employee") in {
+        (r.operation, r.table.name if r.table else None) for r in access.requirements
+    }
+    _select_only_policy().enforce_script(MSSQL, "appdb", script)  # no raise
+
+
 def test_sp_executesql_write_string_denied() -> None:
     script = (
         "DECLARE @s nvarchar(200);"

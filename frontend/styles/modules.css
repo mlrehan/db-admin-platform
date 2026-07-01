@@ -282,11 +282,36 @@ audit-log {
   flex: 1;
 }
 /* Multiple result sets: each gets a bounded, individually-scrollable block, and the pane
-   scrolls between them — exactly like SSMS's stacked "Results" grids. */
+   scrolls between them — exactly like SSMS's stacked "Results" grids. A draggable divider
+   sits between adjacent blocks (see .result-divider) to resize them vertically. */
 .result-block.multi {
   flex: none;
   height: 320px;
-  border-bottom: 2px solid var(--border-strong);
+}
+/* Row-resize handle between two stacked result grids. */
+.result-divider {
+  flex: none;
+  height: 8px;
+  cursor: row-resize;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+  touch-action: none;
+}
+.result-divider::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 38px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+.result-divider:hover::after {
+  background: var(--accent);
 }
 .result-label {
   flex: none;

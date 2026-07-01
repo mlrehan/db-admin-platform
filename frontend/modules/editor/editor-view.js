@@ -228,6 +228,42 @@ export class EditorView extends HTMLElement {
     }
   }
 
+  // A row-resize handle placed between two stacked result-set grids. Dragging it grows/shrinks
+  // the block above (the results pane scrolls, so the one below simply moves).
+  _makeResultDivider(aboveBlock) {
+    const d = document.createElement("div");
+    d.className = "result-divider";
+    d.title = "Drag to resize the result above";
+    d.setAttribute("role", "separator");
+    d.setAttribute("aria-orientation", "horizontal");
+    const MIN = 80;
+    let startY = 0;
+    let startH = 0;
+    let dragging = false;
+    const onMove = (e) => {
+      if (!dragging) return;
+      const point = e.touches ? e.touches[0].clientY : e.clientY;
+      aboveBlock.style.height = `${Math.max(MIN, startH + (point - startY))}px`;
+      e.preventDefault();
+    };
+    const onUp = () => {
+      dragging = false;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.userSelect = "";
+    };
+    d.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      startY = e.clientY;
+      startH = aboveBlock.getBoundingClientRect().height;
+      document.body.style.userSelect = "none";
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      e.preventDefault();
+    });
+    return d;
+  }
+
   async _run() {
     const sessionId = sessionStore.getState().sessionId;
     if (!sessionId) {
@@ -288,6 +324,11 @@ export class EditorView extends HTMLElement {
         block.appendChild(grid);
         this._results.appendChild(block); // connect before setData so it renders
         grid.setData(s.columns, s.rows);
+        // A draggable divider between adjacent result sets lets the user resize each grid
+        // vertically (SSMS-style), dragging the block above it taller/shorter.
+        if (i < resultSets.length - 1) {
+          this._results.appendChild(this._makeResultDivider(block));
+        }
       });
     } else {
       this._results.innerHTML = `<div class="grid-empty muted">No result set returned.</div>`;
