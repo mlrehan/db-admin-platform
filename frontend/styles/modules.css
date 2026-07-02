@@ -30,6 +30,64 @@ audit-log {
   min-height: 0;
 }
 
+/* Connections table: actions stay on one line on desktop, and the whole table scrolls
+   horizontally on medium widths (via .table-scroll). On phones it collapses to stacked cards
+   so every field is readable without horizontal scrolling. */
+.conn-table .conn-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+@media (max-width: 680px) {
+  .conn-table thead {
+    display: none; /* labels come from each cell's data-label instead */
+  }
+  .conn-table,
+  .conn-table tbody,
+  .conn-table tr,
+  .conn-table td {
+    display: block;
+    width: 100%;
+  }
+  .conn-table tr {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    margin: 10px 8px;
+    background: var(--bg-surface);
+    overflow: hidden;
+  }
+  .conn-table td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    text-align: right;
+    padding: 8px 12px;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    min-width: 0;
+  }
+  .conn-table td:last-child {
+    border-bottom: none;
+  }
+  .conn-table td::before {
+    content: attr(data-label);
+    font-weight: 600;
+    color: var(--text-muted);
+    text-align: left;
+    flex: 0 0 auto;
+  }
+  /* Actions wrap onto their own line, full-width tap targets. */
+  .conn-table td.conn-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    white-space: normal;
+  }
+  .conn-table td.conn-actions .btn {
+    flex: 1 1 auto;
+    min-width: 88px;
+  }
+}
+
 /* Data grid (fallback table) */
 .grid-table {
   width: 100%;

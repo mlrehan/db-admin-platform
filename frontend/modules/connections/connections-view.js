@@ -52,11 +52,13 @@ export class ConnectionsView extends HTMLElement {
         return;
       }
       list.innerHTML = `
-        <table class="grid-table">
-          <thead><tr><th>Name</th><th>Engine</th><th>Host</th><th>Database</th>
-            <th style="text-align:right">Actions</th></tr></thead>
-          <tbody>${conns.map((c) => this._row(c)).join("")}</tbody>
-        </table>`;
+        <div class="table-scroll">
+          <table class="grid-table conn-table">
+            <thead><tr><th>Name</th><th>Engine</th><th>Host</th><th>Database</th>
+              <th style="text-align:right">Actions</th></tr></thead>
+            <tbody>${conns.map((c) => this._row(c)).join("")}</tbody>
+          </table>
+        </div>`;
       list.querySelectorAll("[data-action]").forEach((btn) =>
         btn.addEventListener("click", () =>
           this._action(btn.dataset.action, conns.find((c) => c.id === btn.dataset.id))
@@ -76,11 +78,11 @@ export class ConnectionsView extends HTMLElement {
          <button class="btn btn-ghost btn-danger" data-action="delete" data-id="${c.id}">Delete</button>`
       : `<button class="btn" data-action="open" data-id="${c.id}">Connect</button>`;
     return `<tr>
-      <td><strong>${escapeHtml(c.name)}</strong>${mine ? "" : ' <span class="badge">shared</span>'}</td>
-      <td><span class="badge">${escapeHtml(c.engine)}</span></td>
-      <td class="mono">${escapeHtml(c.host)}:${c.port}</td>
-      <td class="mono">${c.database ? escapeHtml(c.database) : '<span class="badge">all databases</span>'}</td>
-      <td style="text-align:right; white-space:nowrap">${ownerActions}</td></tr>`;
+      <td data-label="Name"><strong>${escapeHtml(c.name)}</strong>${mine ? "" : ' <span class="badge">shared</span>'}</td>
+      <td data-label="Engine"><span class="badge">${escapeHtml(c.engine)}</span></td>
+      <td data-label="Host" class="mono">${escapeHtml(c.host)}:${c.port}</td>
+      <td data-label="Database" class="mono">${c.database ? escapeHtml(c.database) : '<span class="badge">all databases</span>'}</td>
+      <td data-label="Actions" class="conn-actions">${ownerActions}</td></tr>`;
   }
 
   async _action(action, conn) {

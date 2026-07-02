@@ -153,6 +153,38 @@ def test_real_insert_still_requires_grant() -> None:
     }
 
 
+def test_drop_temp_table_needs_no_drop_grant() -> None:
+    # A SELECT-only user may DROP a session-local temp table (SQL Server #temp / ##global),
+    # even when it wasn't created in the same script — the object is private to the session.
+    policy = _select_only_policy()
+    for sql in (
+        "DROP TABLE #tmp;",
+        "DROP TABLE #TutorsByStatus",
+        "DROP TABLE IF EXISTS ##globaltmp;",
+        "SELECT StatusId, COUNT(*) INTO #t FROM Tutor GROUP BY StatusId; DROP TABLE #t;",
+    ):
+        policy.enforce_script(MSSQL, "appdb", sql)  # no raise
+
+
+def test_drop_temporary_table_mysql_needs_no_drop_grant() -> None:
+    # MySQL/MariaDB temp tables have no name prefix; the TEMPORARY keyword marks them.
+    _select_only_policy().enforce_script(
+        EngineType.MYSQL, "appdb", "DROP TEMPORARY TABLE tmp;"
+    )
+
+
+def test_drop_real_table_still_needs_drop_grant() -> None:
+    # A DROP of a REAL table is still denied for a SELECT-only user...
+    with pytest.raises(AuthorizationError) as exc:
+        _select_only_policy().enforce_script(MSSQL, "appdb", "DROP TABLE Users;")
+    assert exc.value.code == "ACCESS_DENIED"
+    # ...and a temp DROP earlier in the script must not mask a same-named real-table DROP.
+    with pytest.raises(AuthorizationError):
+        _select_only_policy().enforce_script(
+            MSSQL, "appdb", "DROP TABLE #users; DROP TABLE users;"
+        )
+
+
 def test_admin_bypasses_script_enforcement() -> None:
     admin = AccessPolicy(is_admin=True, has_grants=False, grants=())
     admin.enforce_script(MSSQL, "appdb", "DROP TABLE Tutor; DELETE FROM Student;")  # no raise

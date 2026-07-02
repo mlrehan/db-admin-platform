@@ -39,6 +39,15 @@ export class SessionBar extends HTMLElement {
     this._connections = connections;
     const active = sessionStore.getState().sessionId;
 
+    // If the active session was auto-closed (idle reap) it's gone from `sessions`. Offer a
+    // one-click reconnect to the last connection the user was working on, so they don't have to
+    // hunt through the Connections page after a timeout.
+    const lastConnId = this._lastConnectionId();
+    const reconnectConn =
+      !sessions.length && lastConnId
+        ? connections.find((c) => c.id === lastConnId) || null
+        : null;
+
     // Label a session by its connection (server) name so the user can tell which server it is —
     // e.g. "PostGreSQL_158 (postgresql)" rather than an opaque "postgresql · 1a2b3c4d".
     const connName = (id) => connections.find((c) => c.id === id)?.name;
@@ -63,6 +72,11 @@ export class SessionBar extends HTMLElement {
       <select class="input session-select" ${sessions.length ? "" : "disabled"}>
         ${sessionOpts || '<option value="">No open sessions</option>'}
       </select>
+      ${
+        reconnectConn
+          ? `<button class="btn btn-primary reconnect-btn" title="Your session timed out — reopen it">⟳ Reconnect to ${escapeHtml(reconnectConn.name)}</button>`
+          : ""
+      }
       <span class="muted db-label">Database</span>
       <select class="input db-select" title="Active database" disabled>
         <option value="">—</option>
@@ -81,10 +95,14 @@ export class SessionBar extends HTMLElement {
       const s = this._sessions.find((x) => x.id === e.target.value);
       if (s) {
         setActiveSession(s);
+        this._rememberConnection(s.connection_id);
         this._loadDatabases(s.id);
         this._toggleNewDbButton(s.id);
       }
     });
+    this.querySelector(".reconnect-btn")?.addEventListener("click", () =>
+      this._reconnect(reconnectConn.id)
+    );
     this.querySelector(".db-select").addEventListener("change", (e) =>
       this._switchDatabase(e.target.value)
     );
@@ -96,8 +114,53 @@ export class SessionBar extends HTMLElement {
     const current = sessionStore.getState().sessionId || (sessions[0] && sessions[0].id);
     if (!active && sessions.length) setActiveSession(sessions[0]);
     if (current) {
+      // Remember which connection the active session belongs to (for post-timeout reconnect).
+      const cur = sessions.find((s) => s.id === current);
+      if (cur) this._rememberConnection(cur.connection_id);
       this._loadDatabases(current);
       this._toggleNewDbButton(current);
+    }
+  }
+
+  _lastConnectionId() {
+    try {
+      return localStorage.getItem("dbadmin.last-connection") || null;
+    } catch {
+      return null;
+    }
+  }
+
+  _rememberConnection(connectionId) {
+    if (!connectionId) return;
+    try {
+      localStorage.setItem("dbadmin.last-connection", String(connectionId));
+    } catch {
+      /* storage unavailable — reconnect just won't be offered */
+    }
+  }
+
+  // One-click reopen of a session on the given connection after an idle timeout.
+  async _reconnect(connectionId) {
+    const btn = this.querySelector(".reconnect-btn");
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner sm"></span> Reconnecting…`;
+    }
+    try {
+      const session = await app.api.openSession(connectionId);
+      setActiveSession(session);
+      this._rememberConnection(connectionId);
+      bus.emit(Events.TOAST, { message: "Session reconnected", kind: "success" });
+      await this.refresh();
+    } catch (err) {
+      bus.emit(Events.TOAST, {
+        message: err?.message || "Could not reconnect",
+        kind: "error",
+      });
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "⟳ Reconnect";
+      }
     }
   }
 
@@ -204,6 +267,7 @@ export class SessionBar extends HTMLElement {
       const session = await app.api.openSession(connId);
       bus.emit(Events.TOAST, { message: "Session opened", kind: "success" });
       setActiveSession(session);
+      this._rememberConnection(connId);
       await this.refresh();
     } catch (err) {
       bus.emit(Events.TOAST, {

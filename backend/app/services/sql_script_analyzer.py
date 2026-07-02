@@ -79,6 +79,14 @@ _CREATE_TEMP_RE = re.compile(
 _SELECT_INTO_RE = re.compile(r"\binto\s+([#@][A-Za-z_][\w]*)", re.IGNORECASE)
 # DECLARE @name TABLE(...)  → table variable.
 _DECLARE_TABLE_RE = re.compile(r"\bdeclare\s+(@[A-Za-z_][\w]*)\s+table\b", re.IGNORECASE)
+# DROP [TEMPORARY] TABLE [IF EXISTS] <name> — used to recognise a DROP whose target is a
+# session-local temp object (SQL Server ``#temp``/``##global``, or a MySQL ``TEMPORARY`` table),
+# which needs no DROP grant. Group 1 = the ``temporary`` keyword (MySQL), group 2 = the name.
+_DROP_TABLE_RE = re.compile(
+    r"^\s*drop\s+(temporary\s+)?table\s+(?:if\s+exists\s+)?"
+    r"(#{0,2}@?[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*)",
+    re.IGNORECASE,
+)
 # SET @name = <expr>  → for dynamic-SQL resolution.
 _SET_ASSIGN_RE = re.compile(r"^\s*set\s+(@[A-Za-z_][\w]*)\s*=\s*(.+?)\s*$", re.IGNORECASE | re.DOTALL)
 # EXEC( ... ) or EXEC @var  → dynamic SQL payload.
@@ -127,6 +135,23 @@ def _register_local_objects(stmt: str, locals_: set[str]) -> None:
     for rx in (_CREATE_TEMP_RE, _SELECT_INTO_RE, _DECLARE_TABLE_RE):
         for m in rx.finditer(stmt):
             locals_.add(_norm(m.group(1)))
+
+
+def _drop_targets_local(stmt: str, locals_: set[str]) -> bool:
+    """Whether a ``DROP TABLE`` statement targets a **session-local** temp object, which needs no
+    DROP grant. True when the target is a SQL Server ``#temp``/``##global`` (name prefix), a
+    MySQL ``DROP TEMPORARY TABLE``, or a temp created earlier in this same script (in ``locals_``).
+    Checked on the RAW statement text (before sqlglot strips the ``#`` prefix) and deliberately
+    does NOT register the name globally — so a real-table DROP later in the script is unaffected."""
+    m = _DROP_TABLE_RE.match(stmt)
+    if not m:
+        return False
+    if m.group(1):  # DROP TEMPORARY TABLE … (MySQL/MariaDB) — the target is a temp table
+        return True
+    name = m.group(2)
+    if name.split(".")[-1].startswith(_TEMP_PREFIXES):  # #temp / ##global / @tablevar
+        return True
+    return _norm(name) in locals_
 
 
 def _resolve_string_expr(expr: str, vars_: dict[str, str]) -> str | None:
@@ -438,6 +463,12 @@ def analyze_script_access(sql: str, engine: EngineType) -> ScriptAccess:
                 script.requirements.extend(
                     _fallback_requirements(_strip_to_select(stmt), locals_)
                 )
+            continue
+
+        # Dropping a session-local temp table (#temp / ##global / @var / MySQL TEMPORARY, or a
+        # temp created earlier in this script) needs no DROP grant — the object is private to the
+        # session. Real-table DROPs fall through and still require the DROP grant.
+        if kw == "drop" and _drop_targets_local(stmt, locals_):
             continue
 
         # Ordinary statement: prefer sqlglot, fall back to regex for unparseable T-SQL.
