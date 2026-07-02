@@ -4,8 +4,9 @@
   :class:`AuditLog` row. It writes in its **own** session (independent of the request
   transaction) so an audit record persists even if the originating request later rolls back —
   append-only durability.
-* :class:`AuditService` provides read-only, filtered access for the audit API. There is
-  deliberately no update/delete path: the log is immutable.
+* :class:`AuditService` provides filtered read access plus an admin-only :meth:`delete` for the
+  audit API. There is no update path — existing records are immutable; only an administrator may
+  remove records.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime
 
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -48,6 +50,7 @@ class DatabaseAuditSink:
             error_message=event.error_message,
             request_id=event.request_id,
             ip_address=event.ip_address,
+            ip_private=event.ip_private,
         )
         async with self._sessionmaker() as session:
             session.add(record)
@@ -94,6 +97,18 @@ class AuditService:
         stmt = stmt.order_by(AuditLog.created_at.desc()).limit(limit).offset(offset)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def delete(self, ids: list[uuid.UUID]) -> int:
+        """Delete one or more audit records by id (admin-only, enforced at the API). Returns the
+        number of rows removed. Note: PostgreSQL's append-only DELETE rule is dropped in
+        migration 0008 so this controlled, authorized deletion path can take effect."""
+        if not ids:
+            return 0
+        result = await self._session.execute(
+            sa_delete(AuditLog).where(AuditLog.id.in_(ids))
+        )
+        await self._session.commit()
+        return int(result.rowcount or 0)
 
 
 def build_database_audit_sink(

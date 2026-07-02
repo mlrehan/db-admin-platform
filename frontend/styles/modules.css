@@ -432,6 +432,36 @@ audit-log {
 .tree-meta {
   font-size: var(--fs-xs);
 }
+/* "View definition / ALTER script" action on a schema-tree object row. Hidden until the row is
+   hovered/focused so the tree stays clean. */
+.tree-action {
+  margin-left: auto;
+  padding: 0 6px;
+  height: 20px;
+  line-height: 18px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.tree-row:hover .tree-action,
+.tree-row:focus-within .tree-action,
+.tree-leaf:hover .tree-action,
+.tree-action:focus {
+  opacity: 1;
+}
+.tree-action:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.tree-leaf {
+  position: relative;
+}
 .tree-loading {
   padding: 4px var(--sp-2);
   font-size: var(--fs-sm);

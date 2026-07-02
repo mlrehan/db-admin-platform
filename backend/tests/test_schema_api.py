@@ -34,6 +34,31 @@ async def _open_session(client: AsyncClient, headers: dict) -> str:
     return opened.json()["id"]
 
 
+async def test_object_definition_table(client: AsyncClient, seed_users, fake_pg) -> None:
+    admin = _auth(await _login(client, "admin@test.com", "admin-password-123"))
+    sid = await _open_session(client, admin)
+    resp = await client.get(
+        f"/api/v1/sessions/{sid}/object-definition?object_type=table&name=widgets",
+        headers=admin,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["available"] is True
+    assert "CREATE TABLE widgets" in body["definition"]
+    assert body["dialect"] == "postgresql"
+
+
+async def test_object_definition_unknown_type_rejected(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    admin = _auth(await _login(client, "admin@test.com", "admin-password-123"))
+    sid = await _open_session(client, admin)
+    resp = await client.get(
+        f"/api/v1/sessions/{sid}/object-definition?object_type=bogus&name=x", headers=admin
+    )
+    assert resp.status_code == 404
+
+
 async def test_list_schemas(client: AsyncClient, seed_users, fake_pg) -> None:
     headers = _auth(await _login(client, "admin@test.com", "admin-password-123"))
     sid = await _open_session(client, headers)

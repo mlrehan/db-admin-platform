@@ -68,3 +68,15 @@ class RoutineOut(BaseModel):
     name: str
     kind: str
     return_type: str | None = None
+
+
+class ObjectDefinitionOut(BaseModel):
+    """The editable DDL/definition script for a database object (table/view/procedure/
+    function/trigger/index)."""
+
+    object_type: str
+    name: str
+    schema_name: str | None = None
+    dialect: str
+    definition: str | None = None
+    available: bool

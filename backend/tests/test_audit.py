@@ -136,14 +136,73 @@ async def test_non_admin_cannot_read_others_via_param(
     assert not any(e["statement"] == "SELECT 42" for e in tampered.json())
 
 
-async def test_no_audit_mutation_endpoints(client: AsyncClient, seed_users) -> None:
+async def test_no_rest_mutation_verbs(client: AsyncClient, seed_users) -> None:
     admin = _auth(await _login(client, "admin@test.com", "admin-password-123"))
-    # The audit log is immutable: no DELETE/PUT endpoints exist (405 Method Not Allowed).
+    # Records can't be edited: no DELETE/PUT verbs on a record (405). Deletion is a dedicated,
+    # admin-only POST endpoint (tested separately).
     fake_id = uuid.uuid4()
     assert (await client.delete(f"/api/v1/audit/logs/{fake_id}", headers=admin)).status_code == 405
     assert (
         await client.put(f"/api/v1/audit/logs/{fake_id}", headers=admin, json={})
     ).status_code == 405
+
+
+async def test_admin_can_delete_audit_logs(client: AsyncClient, seed_users, fake_pg) -> None:
+    admin = _auth(await _login(client, "admin@test.com", "admin-password-123"))
+    sid = await _open_session(client, admin)
+    await client.post(f"/api/v1/sessions/{sid}/query", headers=admin,
+                      json={"sql": "SELECT 7 FROM t"})
+    logs = (await client.get("/api/v1/audit/logs", headers=admin)).json()
+    ids = [e["id"] for e in logs]
+    assert ids
+    resp = await client.post("/api/v1/audit/logs/delete", headers=admin, json={"ids": ids})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["deleted"] == len(ids)
+    # They're gone.
+    remaining = (await client.get("/api/v1/audit/logs", headers=admin)).json()
+    assert not any(e["id"] in ids for e in remaining)
+
+
+async def test_non_admin_cannot_delete_audit_logs(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    viewer = _auth(await _login(client, "viewer@test.com", "viewer-password-123"))
+    resp = await client.post(
+        "/api/v1/audit/logs/delete", headers=viewer, json={"ids": [str(uuid.uuid4())]}
+    )
+    # Refused (hidden as 404 — no info leak), and nothing is deleted.
+    assert resp.status_code == 404
+
+
+async def test_only_admin_sees_ip(
+    client: AsyncClient, seed_users, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    # Insert a viewer-owned audit record carrying both IPs directly via the sink.
+    viewer = _auth(await _login(client, "viewer@test.com", "viewer-password-123"))
+    viewer_id = uuid.UUID((await client.get("/api/v1/auth/me", headers=viewer)).json()["id"])
+    started = QueryAuditEvent.now()
+    await DatabaseAuditSink(sessionmaker).record_query(
+        QueryAuditEvent(
+            user_id=viewer_id, user_email="viewer@test.com", session_id=uuid.uuid4(),
+            connection_id=uuid.uuid4(), engine=EngineType.POSTGRESQL, statement="SELECT 9",
+            category="read", destructive=False, success=True, duration_ms=1.0,
+            started_at=started, finished_at=started,
+            ip_address="203.0.113.7", ip_private="10.1.2.3",
+        )
+    )
+
+    # The viewer sees their own record but with NO IP at all (both fields nulled server-side).
+    viewer_logs = (await client.get("/api/v1/audit/logs", headers=viewer)).json()
+    rec = next(e for e in viewer_logs if e["statement"] == "SELECT 9")
+    assert rec["ip_address"] is None and rec["ip_private"] is None
+
+    # An admin viewing the same record sees both the public and private IP.
+    admin = _auth(await _login(client, "admin@test.com", "admin-password-123"))
+    admin_logs = (
+        await client.get(f"/api/v1/audit/logs?user_id={viewer_id}", headers=admin)
+    ).json()
+    arec = next(e for e in admin_logs if e["statement"] == "SELECT 9")
+    assert arec["ip_address"] == "203.0.113.7" and arec["ip_private"] == "10.1.2.3"
 
 
 async def test_audit_filters(client: AsyncClient, seed_users, fake_pg) -> None:

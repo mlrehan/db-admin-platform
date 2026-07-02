@@ -21,6 +21,7 @@ export class AdminView extends HTMLElement {
         <div class="tabs">
           <button class="tab active" data-tab="users">Users</button>
           <button class="tab" data-tab="permissions">Permissions</button>
+          <button class="tab" data-tab="sessions">Active sessions</button>
           <button class="tab" data-tab="audit">Audit log</button>
         </div>
         <div class="panel fill" id="tabbody" style="padding:0; margin-top:12px"></div>
@@ -38,7 +39,95 @@ export class AdminView extends HTMLElement {
     );
     if (tab === "users") this._renderUsers();
     else if (tab === "permissions") this._renderPermissions();
+    else if (tab === "sessions") this._renderSessions();
     else this._renderAudit();
+  }
+
+  // --- active sessions (admin oversight of every user's live sessions) ------------------
+
+  async _renderSessions() {
+    this._body.innerHTML = `<div class="placeholder">Loading…</div>`;
+    let sessions;
+    try {
+      sessions = await app.api.listAllSessions();
+    } catch (err) {
+      this._body.innerHTML = `<div class="placeholder">${escapeHtml(err.message)}</div>`;
+      return;
+    }
+    this._body.innerHTML = `
+      <div class="row" style="padding:12px 16px; border-bottom:1px solid var(--border)">
+        <span class="muted">${sessions.length} active session(s) across all users</span>
+        <span class="spacer"></span>
+        <button class="btn" id="sess-refresh">Refresh</button>
+        <button class="btn btn-danger" id="sess-closeall" ${sessions.length ? "" : "disabled"}>
+          Disconnect all</button>
+      </div>
+      <div class="table-scroll"><table class="grid-table">
+        <thead><tr><th>User</th><th>Server</th><th>Engine</th><th>Database</th>
+          <th>Idle</th><th style="text-align:right">Action</th></tr></thead>
+        <tbody>${
+          sessions.map((s) => this._sessionRow(s)).join("") ||
+          `<tr><td colspan="6" class="muted" style="padding:16px">No active sessions.</td></tr>`
+        }</tbody>
+      </table></div>`;
+    makeResizableTable(this._body.querySelector(".grid-table"));
+    this.querySelector("#sess-refresh").addEventListener("click", () => this._renderSessions());
+    this.querySelector("#sess-closeall").addEventListener("click", () => this._closeAllSessions());
+    this._body.querySelectorAll("[data-disc]").forEach((btn) =>
+      btn.addEventListener("click", () => this._disconnectSession(btn.dataset.disc))
+    );
+  }
+
+  _sessionRow(s) {
+    const idle = s.idle
+      ? `<span style="color:var(--warning,#b5850b)">idle · ${Math.round(s.idle_seconds)}s</span>`
+      : `<span style="color:var(--success)">active</span>`;
+    return `<tr>
+      <td>${escapeHtml(s.user_email || "—")}</td>
+      <td>${escapeHtml(s.connection_name || "—")}</td>
+      <td class="muted">${escapeHtml(s.engine || "")}</td>
+      <td>${escapeHtml(s.database || "—")}</td>
+      <td>${idle}</td>
+      <td style="text-align:right; white-space:nowrap">
+        <button class="btn btn-ghost btn-danger" data-disc="${escapeHtml(s.id)}">Disconnect</button>
+      </td></tr>`;
+  }
+
+  async _disconnectSession(id) {
+    if (!(await confirm({
+      title: "Disconnect this session?",
+      text: "The user's live connection will be closed.",
+      confirmText: "Disconnect",
+      danger: true,
+    })))
+      return;
+    try {
+      await app.api.adminCloseSession(id);
+      bus.emit(Events.TOAST, { message: "Session disconnected", kind: "success" });
+      this._renderSessions();
+    } catch (err) {
+      bus.emit(Events.TOAST, { message: err.message, kind: "error" });
+    }
+  }
+
+  async _closeAllSessions() {
+    if (!(await confirm({
+      title: "Disconnect all sessions?",
+      text: "Every user's live session will be closed. Your own session is kept open.",
+      confirmText: "Disconnect all",
+      danger: true,
+    })))
+      return;
+    try {
+      const res = await app.api.adminCloseAllSessions(true);
+      bus.emit(Events.TOAST, {
+        message: `Disconnected ${res?.closed ?? 0} session(s)`,
+        kind: "success",
+      });
+      this._renderSessions();
+    } catch (err) {
+      bus.emit(Events.TOAST, { message: err.message, kind: "error" });
+    }
   }
 
   // --- permissions (granular RBAC) -----------------------------------------------------
@@ -365,6 +454,7 @@ export class AdminView extends HTMLElement {
       <td class="muted">${u.last_login_at ? new Date(u.last_login_at).toLocaleString() : "—"}</td>
       <td style="text-align:right; white-space:nowrap">
         <button class="btn btn-ghost" data-action="edit" data-id="${u.id}">Edit</button>
+        <button class="btn btn-ghost" data-action="reset" data-id="${u.id}">Reset password</button>
         <button class="btn btn-ghost btn-danger" data-action="delete" data-id="${u.id}">Delete</button>
       </td></tr>`;
   }
@@ -372,6 +462,7 @@ export class AdminView extends HTMLElement {
   async _userAction(action, user) {
     if (!user) return;
     if (action === "edit") return this._userForm(user);
+    if (action === "reset") return this._resetPasswordForm(user);
     if (action === "delete") {
       if (
         !(await confirm({
@@ -389,6 +480,39 @@ export class AdminView extends HTMLElement {
         bus.emit(Events.TOAST, { message: err.message, kind: "error" });
       }
     }
+  }
+
+  // Admin-initiated password reset for another user. All their sessions are revoked server-side.
+  _resetPasswordForm(user) {
+    const form = document.createElement("form");
+    form.className = "modal-form";
+    form.innerHTML = `
+      <p class="muted" style="margin:0 0 8px">Set a new password for
+        <strong>${escapeHtml(user.email)}</strong>. Their active sessions will be signed out.</p>
+      <div class="field"><label>New password</label>
+        <input class="input" name="new_password" type="password" required minlength="12"
+          autocomplete="new-password" placeholder="At least 12 characters"></div>
+      <div class="field"><label>Confirm password</label>
+        <input class="input" name="confirm" type="password" required minlength="12"
+          autocomplete="new-password"></div>
+      <div class="row" style="justify-content:flex-end">
+        <button class="btn btn-primary">Reset password</button></div>`;
+    const close = openModal({ title: `Reset password — ${user.email}`, content: form, width: 440 });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const d = Object.fromEntries(new FormData(form).entries());
+      if (d.new_password !== d.confirm) {
+        bus.emit(Events.TOAST, { message: "Passwords don't match", kind: "error" });
+        return;
+      }
+      try {
+        await app.api.resetUserPassword(user.id, d.new_password);
+        bus.emit(Events.TOAST, { message: `Password reset for ${user.email}`, kind: "success" });
+        close();
+      } catch (err) {
+        bus.emit(Events.TOAST, { message: err.message, kind: "error" });
+      }
+    });
   }
 
   _userForm(existing = null) {

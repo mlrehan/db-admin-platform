@@ -37,6 +37,7 @@ from app.schemas.metadata import (
     DatabaseOut,
     ForeignKeyOut,
     IndexOut,
+    ObjectDefinitionOut,
     RoutineOut,
     SchemaOut,
     SwitchDatabaseRequest,
@@ -256,3 +257,44 @@ async def list_routines(
     session = await _resolve_session(orchestrator, session_id, user.id)
     routines: list[RoutineInfo] = await metadata.list_routines(session, schema)
     return [RoutineOut(name=r.name, kind=r.kind, return_type=r.return_type) for r in routines]
+
+
+_OBJECT_TYPES = {"table", "view", "procedure", "function", "trigger", "index"}
+
+
+@router.get(
+    "/sessions/{session_id}/object-definition",
+    response_model=ObjectDefinitionOut,
+    dependencies=[_can_read],
+)
+async def get_object_definition(
+    session_id: uuid.UUID,
+    user: CurrentUser,
+    orchestrator: Annotated[ConnectionOrchestrator, Depends(get_orchestrator)],
+    access: Annotated[AccessControlService, Depends(get_access_service)],
+    object_type: Annotated[str, Query()],
+    name: Annotated[str, Query()],
+    schema: Annotated[str | None, Query()] = None,
+) -> ObjectDefinitionOut:
+    """Return an object's structure as an editable DDL/ALTER script (table/view/procedure/
+    function/trigger/index). Works for SQL Server, PostgreSQL and MySQL/MariaDB."""
+    otype = object_type.strip().lower()
+    if otype not in _OBJECT_TYPES:
+        raise NotFoundError("Unknown object type.")
+    session = await _resolve_session(orchestrator, session_id, user.id)
+    policy = await access.policy_for(user, session.connection_id)
+    # Tables reveal structure of a specific relation — gate on the same visibility as describe.
+    if otype in ("table", "view") and not policy.table_visible(
+        session.adapter.active_database, schema, name
+    ):
+        raise NotFoundError("Object not found.")
+    getter = getattr(session.adapter, "get_object_definition", None)
+    definition = await getter(otype, name, schema) if getter else None
+    return ObjectDefinitionOut(
+        object_type=otype,
+        name=name,
+        schema_name=schema,
+        dialect=session.adapter.engine.value,
+        definition=definition,
+        available=definition is not None,
+    )

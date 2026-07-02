@@ -27,5 +27,18 @@ class AuditLogOut(BaseModel):
     error_code: str | None
     error_message: str | None
     request_id: str | None
+    # IP fields are populated only for admins (stripped server-side otherwise). ``ip_address``
+    # is the public/edge IP; ``ip_private`` is the client's LAN address.
     ip_address: str | None = None
+    ip_private: str | None = None
     created_at: datetime
+
+
+class AuditDeleteRequest(BaseModel):
+    """Bulk-delete request: the audit record ids to remove (admin-only)."""
+
+    ids: list[uuid.UUID]
+
+
+class AuditDeleteResult(BaseModel):
+    deleted: int

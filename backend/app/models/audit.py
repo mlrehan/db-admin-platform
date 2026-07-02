@@ -1,8 +1,9 @@
 """Immutable audit log ORM model (control plane).
 
-Records every query execution. The table is **append-only**: the application never issues
-``UPDATE``/``DELETE`` against it, and the PostgreSQL migration installs rules that block those
-operations at the database level (defence in depth).
+Records every query execution. Entries are **immutable** — the application never issues
+``UPDATE`` against the table and a PostgreSQL rule blocks updates at the database level
+(defence in depth). Records may be **deleted only by an administrator** through the authorized
+audit API (migration 0008 drops the DB-level DELETE rule so that controlled path works).
 
 Identity is denormalized (``user_email`` stored alongside ``user_id``, no foreign key) so the
 audit trail survives deletion of the referenced user — an audit record must outlive the
@@ -49,8 +50,12 @@ class AuditLog(Base):
 
     # Correlation + ordering.
     request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # Client IP that initiated the request (best-effort; may be NULL).
+    # Client IP that initiated the request (best-effort; may be NULL). ``ip_address`` is the
+    # PUBLIC/edge-observed address (X-Forwarded-For first hop, or the socket peer). ``ip_private``
+    # is the client's LAN address (reported by the browser via the X-Private-IP header, or the
+    # direct socket peer when no proxy). Only admins may view these (see the audit API).
     ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ip_private: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True, nullable=False
     )

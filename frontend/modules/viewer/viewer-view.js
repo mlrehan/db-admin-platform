@@ -93,11 +93,17 @@ export class ViewerView extends HTMLElement {
     this._tableSel.innerHTML = `<option value="">Table…</option>`;
     this._tableSel.disabled = true;
     if (!schema) return;
-    const tables = await app.api.listTables(sessionId, schema);
-    this._tableSel.innerHTML =
-      `<option value="">Table…</option>` +
-      tables.map((t) => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)}</option>`).join("");
-    this._tableSel.disabled = false;
+    this._tableSel.innerHTML = `<option value="">Loading tables…</option>`;
+    try {
+      const tables = await app.api.listTables(sessionId, schema);
+      this._tableSel.innerHTML =
+        `<option value="">Table…</option>` +
+        tables.map((t) => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)}</option>`).join("");
+      this._tableSel.disabled = false;
+    } catch (err) {
+      this._tableSel.innerHTML = `<option value="">Table…</option>`;
+      bus.emit(Events.TOAST, { message: err.message, kind: "error" });
+    }
   }
 
   async _loadColumnsThenPage() {
@@ -105,7 +111,10 @@ export class ViewerView extends HTMLElement {
     const schema = this._schemaSel.value;
     const table = this._tableSel.value;
     this._orderSel.innerHTML = `<option value="">No ordering</option>`;
+    // Show the loading indicator immediately on table selection — it must cover the (possibly
+    // slow) describe-table introspection AND the first page fetch, not just the page fetch.
     if (table) {
+      this._grid.setBusy(true, "Loading table…");
       try {
         const detail = await app.api.describeTable(sessionId, table, schema);
         this._orderSel.innerHTML =

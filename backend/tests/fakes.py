@@ -117,6 +117,15 @@ class FakeAdapter(DatabaseAdapter):
         routines = self._config.options.get("routines") or {}
         return routines.get(name.split(".")[-1])
 
+    async def get_object_definition(
+        self, object_type: str, name: str, schema: str | None = None
+    ) -> str | None:
+        otype = (object_type or "").lower()
+        if otype == "table":
+            return f"CREATE TABLE {name} (\n  id INTEGER NOT NULL,\n  PRIMARY KEY (id)\n);"
+        routines = self._config.options.get("routines") or {}
+        return routines.get(name.split(".")[-1])
+
     async def run_script(self, sql: str, *, max_rows: int = 1000):
         """Single-session script run: one result set per row-returning statement, a message
         per non-returning one (mirrors the real adapter's contract)."""

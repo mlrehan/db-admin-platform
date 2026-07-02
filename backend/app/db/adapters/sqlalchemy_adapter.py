@@ -268,6 +268,125 @@ class SQLAlchemyAdapter(DatabaseAdapter):
             return None
         return str(row[0]) if row and row[0] is not None else None
 
+    # Per-object-type "get definition" SQL, one ``:name`` VALUE parameter (safely bound). Keys:
+    # view / procedure / function / trigger / index. Engines set what their catalog exposes;
+    # TABLES are generated from ``describe_table`` instead (uniform across all engines).
+    object_definition_sql: ClassVar[dict[str, str]] = {}
+
+    def _quote_ident(self, name: str) -> str:
+        """Dialect-correct identifier quoting (defence-in-depth for the few object-definition
+        queries that must interpolate an identifier, e.g. MySQL ``SHOW CREATE``)."""
+        engine = self._engine_for(None)
+        return engine.dialect.identifier_preparer.quote(name)
+
+    async def get_object_definition(
+        self, object_type: str, name: str, schema: str | None = None
+    ) -> str | None:
+        """Return an editable DDL/definition script for a database object so the user can view
+        and modify its structure. ``object_type`` is one of table/view/procedure/function/
+        trigger/index. Works across SQL Server, PostgreSQL and MySQL/MariaDB (per-engine catalog
+        queries; tables are reconstructed from introspection). Returns ``None`` when the engine
+        cannot produce a definition for that object."""
+        otype = (object_type or "").strip().lower()
+        if otype in ("table", "base table", "view") and otype != "view":
+            return await self._generate_table_ddl(name, schema)
+
+        # MySQL exposes everything via SHOW CREATE (identifier, not a bind value).
+        if self.dialect == "mysql":
+            defn = await self._mysql_show_create(otype, name, schema)
+            if defn is not None:
+                return defn
+
+        sql = self.object_definition_sql.get(otype)
+        if sql:
+            cleaned = name.replace("[", "").replace("]", "").replace('"', "").replace("`", "")
+            param = cleaned if self.dialect == "mssql" else cleaned.split(".")[-1]
+            try:
+                async with self.acquire() as conn:
+                    row = (await conn.execute(text(sql), {"name": param})).first()
+            except Exception:  # noqa: BLE001 - catalog error → "no definition available"
+                row = None
+            if row and row[0] is not None:
+                return str(row[0])
+
+        # Views on engines without a dedicated query, and proc/func fallbacks.
+        if otype == "view":
+            return await self._generate_view_ddl(name, schema)
+        if otype in ("procedure", "function", "trigger"):
+            return await self.get_routine_definition(name)
+        return None
+
+    async def _mysql_show_create(
+        self, object_type: str, name: str, schema: str | None
+    ) -> str | None:
+        """MySQL/MariaDB ``SHOW CREATE {TABLE|VIEW|PROCEDURE|FUNCTION|TRIGGER}``. The object name
+        is an identifier (not bindable) so it is validated + dialect-quoted."""
+        kind = {
+            "table": "TABLE", "base table": "TABLE", "view": "VIEW",
+            "procedure": "PROCEDURE", "function": "FUNCTION", "trigger": "TRIGGER",
+        }.get(object_type)
+        if kind is None:
+            return None
+        ident = self._quote_ident(name.split(".")[-1])
+        if schema:
+            ident = f"{self._quote_ident(schema)}.{ident}"
+        try:
+            async with self.acquire() as conn:
+                row = (await conn.execute(text(f"SHOW CREATE {kind} {ident}"))).first()
+        except Exception:  # noqa: BLE001
+            return None
+        if not row:
+            return None
+        # SHOW CREATE returns the DDL in the last-but-one column for tables/views and the
+        # "Create ..." column for routines; pick the longest string column defensively.
+        mapping = row._mapping
+        candidates = [v for v in mapping.values() if isinstance(v, str)]
+        return max(candidates, key=len) if candidates else None
+
+    async def _generate_view_ddl(self, name: str, schema: str | None) -> str | None:
+        defn = await self.get_routine_definition(name)
+        return defn
+
+    async def _generate_table_ddl(self, name: str, schema: str | None) -> str | None:
+        """Reconstruct a ``CREATE TABLE`` script from introspection (columns, PK, FKs) plus any
+        secondary indexes as ``CREATE INDEX`` statements. Engine-neutral, so it works uniformly
+        across SQL Server, PostgreSQL and MySQL/MariaDB."""
+        try:
+            detail = await self.describe_table(name, schema)
+        except Exception:  # noqa: BLE001
+            return None
+        q = self._quote_ident
+        full = f"{q(schema)}.{q(detail.table.name)}" if schema else q(detail.table.name)
+        lines: list[str] = []
+        for c in detail.columns:
+            parts = [f"  {q(c.name)} {c.data_type}"]
+            if not c.nullable:
+                parts.append("NOT NULL")
+            if c.default is not None:
+                parts.append(f"DEFAULT {c.default}")
+            lines.append(" ".join(parts))
+        if detail.primary_key:
+            pk_cols = ", ".join(q(c) for c in detail.primary_key)
+            lines.append(f"  PRIMARY KEY ({pk_cols})")
+        for fk in detail.foreign_keys:
+            cols = ", ".join(q(c) for c in fk.columns)
+            ref_tbl = (
+                f"{q(fk.referred_schema)}.{q(fk.referred_table)}"
+                if fk.referred_schema else q(fk.referred_table)
+            )
+            ref_cols = ", ".join(q(c) for c in fk.referred_columns)
+            name_clause = f"CONSTRAINT {q(fk.name)} " if fk.name else ""
+            lines.append(f"  {name_clause}FOREIGN KEY ({cols}) REFERENCES {ref_tbl} ({ref_cols})")
+        ddl = f"CREATE TABLE {full} (\n" + ",\n".join(lines) + "\n);"
+        # Secondary (non-primary) indexes as separate statements.
+        for idx in detail.indexes:
+            if idx.primary:
+                continue
+            unique = "UNIQUE " if idx.unique else ""
+            cols = ", ".join(q(c) for c in idx.columns)
+            ddl += f"\n\nCREATE {unique}INDEX {q(idx.name)} ON {full} ({cols});"
+        return ddl
+
     async def create_database(self, name: str) -> str:
         """Create a new database on the server and return its name.
 

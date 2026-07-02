@@ -149,6 +149,35 @@ class ConnectionOrchestrator:
         await _safe_close(session.adapter)
         logger.info("Live session closed", extra={"session_id": str(session_id)})
 
+    # --- admin-wide views / controls -----------------------------------------------------
+
+    async def list_all_sessions(self) -> list[LiveSession]:
+        """Every live session across all users (admin oversight only)."""
+        async with self._lock:
+            return list(self._sessions.values())
+
+    async def close_any_session(self, session_id: uuid.UUID) -> None:
+        """Disconnect any user's session by id (admin only — no ownership check)."""
+        async with self._lock:
+            session = self._sessions.pop(session_id, None)
+            if session is None:
+                raise NotFoundError("Session not found.")
+        await _safe_close(session.adapter)
+        logger.info("Live session closed by admin", extra={"session_id": str(session_id)})
+
+    async def close_all_sessions(self, *, exclude: set[uuid.UUID] | None = None) -> int:
+        """Disconnect every live session (admin only). ``exclude`` keeps the given session ids
+        open (e.g. the admin's own), returning the number actually closed."""
+        exclude = exclude or set()
+        async with self._lock:
+            targets = [s for s in self._sessions.values() if s.id not in exclude]
+            for s in targets:
+                del self._sessions[s.id]
+        for s in targets:
+            await _safe_close(s.adapter)
+        logger.info("Admin closed all sessions", extra={"count": len(targets)})
+        return len(targets)
+
     async def close_all_for_user(self, user_id: uuid.UUID) -> int:
         async with self._lock:
             owned = [s for s in self._sessions.values() if s.user_id == user_id]

@@ -2,7 +2,9 @@
 
 import { app } from "../../core/context.js";
 import { bus, Events } from "../../core/events.js";
-import { sessionStore } from "../../core/session-state.js";
+import { sessionStore, setPendingEditorSql } from "../../core/session-state.js";
+import { loading, toast } from "../../core/notify.js";
+import { openModal } from "../../components/modal.js";
 import { escapeHtml } from "../../components/view-helpers.js";
 import "../../components/session-bar.js";
 
@@ -59,18 +61,25 @@ export class SchemaView extends HTMLElement {
     ]);
     const children = [];
     for (const t of tables) {
+      const kind = t.kind === "view" ? "view" : "table";
       children.push(
         this._node({
           label: t.name,
           icon: t.kind === "view" ? "◫" : "▤",
           badge: t.kind === "view" ? "view" : null,
           loader: () => this._loadTable(sid, schema, t.name),
+          action: { title: "View structure / ALTER script",
+                    run: () => this._showDefinition(kind, t.name, schema) },
         })
       );
     }
     if (routines.length) {
       const routineNodes = routines.map((r) =>
-        this._leaf(`${r.kind === "procedure" ? "ƒ" : "λ"} ${escapeHtml(r.name)}`, r.return_type || "")
+        this._objectLeaf(
+          `${r.kind === "procedure" ? "ƒ" : "λ"} ${escapeHtml(r.name)}`,
+          r.return_type || "",
+          { objectType: r.kind, name: r.name, schema }
+        )
       );
       children.push(this._node({ label: "Routines", icon: "⚙", staticChildren: routineNodes }));
     }
@@ -106,7 +115,7 @@ export class SchemaView extends HTMLElement {
 
   // --- tree primitives -----------------------------------------------------------------
 
-  _node({ label, icon, badge, loader, staticChildren }) {
+  _node({ label, icon, badge, loader, staticChildren, action }) {
     const el = document.createElement("div");
     el.className = "tree-node";
     el.innerHTML = `
@@ -115,12 +124,19 @@ export class SchemaView extends HTMLElement {
         <span class="tree-icon">${icon}</span>
         <span class="tree-label">${escapeHtml(label)}</span>
         ${badge ? `<span class="badge">${escapeHtml(badge)}</span>` : ""}
+        ${action ? `<button class="tree-action" title="${escapeHtml(action.title || "View definition")}">&lt;/&gt;</button>` : ""}
       </div>
       <div class="tree-children hidden"></div>`;
     const row = el.querySelector(".tree-row");
     const caret = el.querySelector(".tree-caret");
     const childBox = el.querySelector(".tree-children");
     let loaded = false;
+    if (action) {
+      el.querySelector(".tree-action").addEventListener("click", (e) => {
+        e.stopPropagation(); // don't toggle the tree row
+        action.run();
+      });
+    }
 
     const toggle = async () => {
       const open = !childBox.classList.contains("hidden");
@@ -162,6 +178,69 @@ export class SchemaView extends HTMLElement {
     el.innerHTML = `<span class="tree-label mono">${label}</span>
       ${meta ? `<span class="muted tree-meta">${meta}</span>` : ""}`;
     return el;
+  }
+
+  // A leaf with a "view definition" action (used for routines).
+  _objectLeaf(label, meta, { objectType, name, schema }) {
+    const el = document.createElement("div");
+    el.className = "tree-leaf";
+    el.innerHTML = `<span class="tree-label mono">${label}</span>
+      ${meta ? `<span class="muted tree-meta">${meta}</span>` : ""}
+      <button class="tree-action" title="View definition / ALTER script">&lt;/&gt;</button>`;
+    el.querySelector(".tree-action").addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._showDefinition(objectType, name, schema);
+    });
+    return el;
+  }
+
+  // Fetch an object's DDL and show it in an editable modal (editable ALTER script). Works for
+  // tables/views/procedures/functions/triggers across SQL Server, PostgreSQL and MySQL/MariaDB.
+  async _showDefinition(objectType, name, schema) {
+    const sid = this._session();
+    if (!sid) return;
+    const close = await loading("Loading definition…");
+    let res;
+    try {
+      res = await app.api.getObjectDefinition(sid, { objectType, name, schema });
+    } catch (err) {
+      close();
+      toast(err?.message || "Could not load definition", "error");
+      return;
+    }
+    close();
+    const def =
+      res?.definition ||
+      "-- A definition is not available for this object on this database engine.";
+    const wrap = document.createElement("div");
+    wrap.innerHTML = `
+      <p class="muted" style="margin:0 0 8px">
+        ${escapeHtml(objectType)} · <strong>${escapeHtml(name)}</strong> · ${escapeHtml(res?.dialect || "")}
+      </p>
+      <textarea id="ddl" spellcheck="false"
+        style="width:100%;height:360px;box-sizing:border-box;font-family:var(--font-mono);
+               font-size:13px;white-space:pre;overflow:auto;padding:10px;
+               border:1px solid var(--border);border-radius:6px;background:var(--bg-base);
+               color:var(--text-primary)">${escapeHtml(def)}</textarea>
+      <div class="row" style="gap:8px;justify-content:flex-end;margin-top:10px">
+        <button class="btn btn-ghost" id="ddl-copy">Copy</button>
+        <button class="btn btn-primary" id="ddl-edit">Open in SQL Editor</button>
+      </div>`;
+    const closeModal = openModal({ title: `Structure — ${name}`, content: wrap, width: 760 });
+    const ta = wrap.querySelector("#ddl");
+    wrap.querySelector("#ddl-copy").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(ta.value);
+        toast("Copied to clipboard", "success");
+      } catch {
+        toast("Copy failed", "error");
+      }
+    });
+    wrap.querySelector("#ddl-edit").addEventListener("click", () => {
+      setPendingEditorSql(ta.value);
+      closeModal();
+      app.router.navigate("/editor");
+    });
   }
 }
 

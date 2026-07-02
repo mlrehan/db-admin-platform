@@ -32,7 +32,7 @@ from app.core.exceptions import (
     QueryTimeoutError,
     ValidationError,
 )
-from app.core.context import get_client_ip, get_request_id
+from app.core.context import get_client_ip, get_client_private_ip, get_request_id
 from app.core.logging import get_logger
 from app.db.adapters.base import QueryColumn
 from app.models.user import User
@@ -151,11 +151,29 @@ class QueryEngine:
             await self._authorize_routine(name, session, policy)
 
     async def _authorize_routine(
-        self, name: str, session: LiveSession, policy: AccessPolicy
+        self,
+        name: str,
+        session: LiveSession,
+        policy: AccessPolicy,
+        _seen: set[str] | None = None,
     ) -> None:
-        """Allow EXEC/CALL of a stored routine only if its body is provably read-only and reads
-        only tables the caller may read. Admins never reach here (they return no routines)."""
+        """Authorize EXEC/CALL of a stored routine against the caller's ACTUAL grants.
+
+        A user may execute a routine iff they hold every permission the routine's body needs —
+        exactly what they'd need to run the same statements directly. So we fetch the routine
+        body, analyze the operations it performs (SELECT for reads, INSERT/UPDATE/DELETE/CREATE/
+        ALTER/DROP for writes), and require a matching grant for each. A user with INSERT can run
+        a procedure that inserts; a user without DROP cannot run one that drops. Routines the body
+        itself calls are authorized recursively. Fail-closed if the body can't be read or its
+        operations can't be statically determined. Admins never reach here (they return no
+        routines). Works for SQL Server, PostgreSQL and MySQL/MariaDB (per-engine body fetch)."""
         from app.services.sql_script_analyzer import analyze_routine_definition
+
+        seen = _seen if _seen is not None else set()
+        key = name.lower()
+        if key in seen:  # guard against recursive / mutually-recursive routine references
+            return
+        seen.add(key)
 
         engine = session.adapter.engine
         database = session.adapter.active_database
@@ -163,24 +181,24 @@ class QueryEngine:
         definition = await get_def(name) if get_def else None
         if not definition:
             raise AuthorizationError(
-                f"Stored routine '{name}' could not be verified as read-only; execution denied.",
+                f"Stored routine '{name}' could not be found or read for authorization; "
+                f"execution denied.",
                 code="ACCESS_DENIED",
             )
         access = analyze_routine_definition(definition, engine)
-        if access.denied_reason or access.routines:
+        if access.denied_reason:
             raise AuthorizationError(
-                f"Stored routine '{name}' is not provably read-only "
-                f"(it performs unsafe or nested operations) and cannot be executed with your access.",
+                f"Stored routine '{name}' contains operations that could not be verified "
+                f"for access control and cannot be executed with your access.",
                 code="ACCESS_DENIED",
             )
+        # Require a grant for every operation the body performs — matching the caller's actual
+        # permissions rather than demanding the routine be read-only.
         for req in access.requirements:
-            if req.operation != SqlOperation.SELECT:
-                raise AuthorizationError(
-                    f"Stored routine '{name}' performs {req.operation.value}; you may only "
-                    f"execute read-only routines.",
-                    code="ACCESS_DENIED",
-                )
-            policy.require_grant(SqlOperation.SELECT, database, req.table)
+            policy.require_grant(req.operation, database, req.table)
+        # Authorize any routine this routine itself calls (recursively, cycle-guarded).
+        for nested in access.routines:
+            await self._authorize_routine(nested, session, policy, seen)
 
     # --- buffered execution --------------------------------------------------------------
 
@@ -472,6 +490,7 @@ class QueryEngine:
             error_message=(error[:500] if error else None),
             request_id=get_request_id(),
             ip_address=get_client_ip(),
+            ip_private=get_client_private_ip(),
         )
         try:
             await self._audit.record_query(event)
@@ -550,6 +569,7 @@ class QueryEngine:
             error_message=(error[:500] if error else None),
             request_id=get_request_id(),
             ip_address=get_client_ip(),
+            ip_private=get_client_private_ip(),
         )
         try:
             await self._audit.record_query(event)

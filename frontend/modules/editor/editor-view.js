@@ -4,7 +4,7 @@
 
 import { app } from "../../core/context.js";
 import { bus, Events } from "../../core/events.js";
-import { sessionStore } from "../../core/session-state.js";
+import { sessionStore, takePendingEditorSql } from "../../core/session-state.js";
 import { clearMetadataCache } from "../../core/metadata-cache.js";
 import { escapeHtml } from "../../components/view-helpers.js";
 import "../../components/session-bar.js";
@@ -54,10 +54,17 @@ export class EditorView extends HTMLElement {
     this._runBtn = this.querySelector("#run");
     this._fileInput = this.querySelector("#file-input");
 
-    // Restore this user's most recent unsaved query (preserved across navigation / reloads).
+    // A one-shot hand-off (e.g. "Open in SQL Editor" from the object-definition viewer) takes
+    // priority over the saved draft; otherwise restore this user's most recent unsaved query.
+    const pending = takePendingEditorSql();
     try {
-      const draft = localStorage.getItem(this._draftKey());
-      if (draft !== null) this._editor.setValue(draft);
+      if (pending != null) {
+        this._editor.setValue(pending);
+        this._saveDraft();
+      } else {
+        const draft = localStorage.getItem(this._draftKey());
+        if (draft !== null) this._editor.setValue(draft);
+      }
     } catch {
       /* storage unavailable — fall back to the default query */
     }

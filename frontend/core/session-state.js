@@ -25,3 +25,15 @@ export function setActiveDatabase(database) {
   clearMetadataCache(); // switching database invalidates cached schema/tables
   sessionStore.setState({ database: database || null });
 }
+
+// A one-shot hand-off of SQL to the editor across a route change (e.g. "Open in SQL Editor"
+// from the Schema Explorer's object-definition viewer). The editor consumes it on mount.
+let _pendingEditorSql = null;
+export function setPendingEditorSql(sql) {
+  _pendingEditorSql = sql;
+}
+export function takePendingEditorSql() {
+  const sql = _pendingEditorSql;
+  _pendingEditorSql = null;
+  return sql;
+}

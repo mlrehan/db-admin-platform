@@ -46,11 +46,23 @@ export class HttpClient {
     return this.request("DELETE", path, undefined, opts);
   }
 
-  async request(method, path, body, { retry = true, auth = true } = {}) {
+  async request(method, path, body, opts = {}) {
+    // Count in-flight requests so a global progress bar can reflect activity (loading-bar.js).
+    HttpClient._activityStart();
+    try {
+      return await this._doRequest(method, path, body, opts);
+    } finally {
+      HttpClient._activityEnd();
+    }
+  }
+
+  async _doRequest(method, path, body, { retry = true, auth = true } = {}) {
     const headers = { Accept: "application/json" };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const token = auth ? this.getAccessToken?.() : null;
     if (token) headers["Authorization"] = `Bearer ${token}`;
+    // Best-effort: report the browser's detected LAN address for the audit trail (admins only).
+    if (HttpClient._privateIp) headers["X-Private-IP"] = HttpClient._privateIp;
 
     const response = await this.fetch(this.baseUrl + path, {
       method,
@@ -84,6 +96,25 @@ export class HttpClient {
         });
     }
     return this._refreshing;
+  }
+
+  // --- global request-activity signal (for the top loading bar) ------------------------
+  static _active = 0;
+  static _privateIp = null;
+  static _activityStart() {
+    HttpClient._active += 1;
+    HttpClient._emitActivity();
+  }
+  static _activityEnd() {
+    HttpClient._active = Math.max(0, HttpClient._active - 1);
+    HttpClient._emitActivity();
+  }
+  static _emitActivity() {
+    if (typeof window !== "undefined" && window.dispatchEvent) {
+      window.dispatchEvent(
+        new CustomEvent("http:activity", { detail: { active: HttpClient._active } })
+      );
+    }
   }
 }
 

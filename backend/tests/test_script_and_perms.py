@@ -187,23 +187,27 @@ async def test_script_denied_as_a_unit_before_execution(
 
 
 async def _granted_user_with_routines(
-    client: AsyncClient, admin: dict, routines: dict
+    client: AsyncClient, admin: dict, routines: dict, operations: list[str] | None = None
 ) -> tuple[dict, str]:
-    """A viewer granted SELECT on appdb, on a connection whose adapter exposes ``routines``."""
+    """A viewer granted ``operations`` (default SELECT) on appdb, on a connection whose adapter
+    exposes ``routines`` (name → CREATE definition, returned by ``get_routine_definition``)."""
+    import uuid as _uuid
+
     conn = await client.post(
         "/api/v1/connections", headers=admin,
         json={"name": "rtn-pg", "engine": "postgresql", "host": "h", "database": "appdb",
               "username": "u", "password": "secret-password-1", "options": {"routines": routines}},
     )
     conn_id = conn.json()["id"]
+    email = f"rtn_{_uuid.uuid4().hex[:8]}@test.com"
     uid = (await client.post(
         "/api/v1/users", headers=admin,
-        json={"email": "rtnuser@test.com", "password": "user-strong-pass-1", "role": "viewer"},
+        json={"email": email, "password": "user-strong-pass-1", "role": "viewer"},
     )).json()["id"]
     await client.post("/api/v1/access/grants", headers=admin,
                       json={"subject_type": "user", "subject_id": uid, "connection_id": conn_id,
-                            "operations": ["SELECT"], "database": "appdb"})
-    user = await _login(client, "rtnuser@test.com", "user-strong-pass-1")
+                            "operations": operations or ["SELECT"], "database": "appdb"})
+    user = await _login(client, email, "user-strong-pass-1")
     sid = (await client.post("/api/v1/sessions", headers=user,
                              json={"connection_id": conn_id})).json()["id"]
     return user, sid
@@ -232,6 +236,59 @@ async def test_writing_routine_exec_denied(client: AsyncClient, seed_users, fake
     resp = await client.post(f"/api/v1/sessions/{sid}/script", headers=user,
                              json={"sql": "EXEC usp_del;"})
     assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is False
+    assert body["statements"][0]["error_code"] == "ACCESS_DENIED"
+
+
+async def test_inserting_routine_exec_allowed_with_insert_grant(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    # A user with INSERT may EXEC a routine that inserts — validated against actual grants, not
+    # forced to be read-only. (The reported AddCity bug.)
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    user, sid = await _granted_user_with_routines(
+        client, admin,
+        {"AddCity": "CREATE PROCEDURE AddCity @Name varchar(75) AS BEGIN "
+                    "INSERT INTO City(Name) VALUES (@Name) END"},
+        operations=["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER"],
+    )
+    resp = await client.post(f"/api/v1/sessions/{sid}/script", headers=user,
+                             json={"sql": "EXEC AddCity 'London';"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True
+
+
+async def test_inserting_routine_denied_without_insert_grant(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    # The same inserting routine is denied for a user who lacks INSERT (only has SELECT).
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    user, sid = await _granted_user_with_routines(
+        client, admin,
+        {"AddCity": "CREATE PROCEDURE AddCity @Name varchar(75) AS BEGIN "
+                    "INSERT INTO City(Name) VALUES (@Name) END"},
+        operations=["SELECT"],
+    )
+    resp = await client.post(f"/api/v1/sessions/{sid}/script", headers=user,
+                             json={"sql": "EXEC AddCity 'London';"})
+    body = resp.json()
+    assert body["success"] is False
+    assert body["statements"][0]["error_code"] == "ACCESS_DENIED"
+
+
+async def test_dropping_routine_denied_without_drop_grant(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    # A user with everything EXCEPT DROP cannot run a routine that drops.
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    user, sid = await _granted_user_with_routines(
+        client, admin,
+        {"usp_drop": "CREATE PROCEDURE usp_drop AS BEGIN DROP TABLE City END"},
+        operations=["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER"],
+    )
+    resp = await client.post(f"/api/v1/sessions/{sid}/script", headers=user,
+                             json={"sql": "EXEC usp_drop;"})
     body = resp.json()
     assert body["success"] is False
     assert body["statements"][0]["error_code"] == "ACCESS_DENIED"

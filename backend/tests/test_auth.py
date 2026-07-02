@@ -138,6 +138,37 @@ async def test_new_user_can_log_in(client: AsyncClient, seed_users) -> None:
     assert resp.status_code == 200
 
 
+async def test_admin_resets_user_password(client: AsyncClient, seed_users) -> None:
+    admin = (await _login(client, "admin@test.com", "admin-password-123")).json()
+    headers = {"Authorization": f"Bearer {admin['access_token']}"}
+    created = await client.post(
+        "/api/v1/users", headers=headers,
+        json={"email": "resetme@test.com", "password": "original-pass-123", "role": "viewer"},
+    )
+    uid = created.json()["id"]
+    # Admin resets the password.
+    resp = await client.post(
+        f"/api/v1/users/{uid}/reset-password", headers=headers,
+        json={"new_password": "brand-new-pass-456"},
+    )
+    assert resp.status_code == 200, resp.text
+    # Old password no longer works; the new one does.
+    assert (await _login(client, "resetme@test.com", "original-pass-123")).status_code == 401
+    assert (await _login(client, "resetme@test.com", "brand-new-pass-456")).status_code == 200
+
+
+async def test_non_admin_cannot_reset_password(client: AsyncClient, seed_users) -> None:
+    viewer = (await _login(client, "viewer@test.com", "viewer-password-123")).json()
+    headers = {"Authorization": f"Bearer {viewer['access_token']}"}
+    import uuid as _uuid
+
+    resp = await client.post(
+        f"/api/v1/users/{_uuid.uuid4()}/reset-password", headers=headers,
+        json={"new_password": "brand-new-pass-456"},
+    )
+    assert resp.status_code == 403
+
+
 # --- pure RBAC unit checks ---------------------------------------------------------------
 
 

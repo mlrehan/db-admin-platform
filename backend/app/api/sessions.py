@@ -16,17 +16,33 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Response, status
 
 from app.api.deps import get_access_service, get_connection_service, get_orchestrator
-from app.auth.dependencies import CurrentUser, has_permission, require_permissions
+from app.auth.dependencies import (
+    CurrentUser,
+    get_user_service,
+    has_permission,
+    require_permissions,
+)
 from app.auth.roles import Permission
 from app.core.exceptions import NotFoundError
-from app.schemas.session import OpenSessionRequest, SessionRead
+from app.schemas.session import (
+    AdminSessionRead,
+    CloseAllSessionsRequest,
+    CloseSessionsResult,
+    OpenSessionRequest,
+    SessionRead,
+)
 from app.services.access_control import AccessControlService
 from app.services.connection_service import ConnectionService
 from app.services.orchestrator import ConnectionOrchestrator, LiveSession
+from app.services.user_service import UserService
 
 router = APIRouter(tags=["sessions"])
 
 _can_use = Depends(require_permissions(Permission.CONNECTION_USE))
+_admin_only = Depends(require_permissions(Permission.USER_MANAGE))
+
+# A session with no activity beyond this many seconds is flagged "idle" in the admin view.
+_IDLE_THRESHOLD_SECONDS = 300
 
 
 def _to_read(session: LiveSession, *, can_create_database: bool = False) -> SessionRead:
@@ -118,6 +134,80 @@ async def get_session_info(
     return _to_read(
         session, can_create_database=await _can_create_db(access, user, session.connection_id)
     )
+
+
+# --- admin oversight of all users' sessions ----------------------------------------------
+
+
+@router.get("/admin/all", response_model=list[AdminSessionRead], dependencies=[_admin_only])
+async def list_all_sessions(
+    orchestrator: Annotated[ConnectionOrchestrator, Depends(get_orchestrator)],
+    connections: Annotated[ConnectionService, Depends(get_connection_service)],
+    users: Annotated[UserService, Depends(get_user_service)],
+) -> list[AdminSessionRead]:
+    """Every live session across all users (admin oversight): server name, engine, database,
+    idle status. Enriched with the owning user's email and the connection's name."""
+    sessions = await orchestrator.list_all_sessions()
+    # Resolve owner emails and connection names once per distinct id.
+    email_cache: dict[uuid.UUID, str | None] = {}
+    name_cache: dict[uuid.UUID, str | None] = {}
+    out: list[AdminSessionRead] = []
+    for s in sessions:
+        if s.user_id not in email_cache:
+            u = await users.get_by_id(s.user_id)
+            email_cache[s.user_id] = getattr(u, "email", None)
+        if s.connection_id not in name_cache:
+            c = await connections.get(s.connection_id)
+            name_cache[s.connection_id] = getattr(c, "name", None)
+        idle = s.idle_seconds()
+        out.append(
+            AdminSessionRead(
+                id=s.id,
+                user_id=s.user_id,
+                user_email=email_cache[s.user_id],
+                connection_id=s.connection_id,
+                connection_name=name_cache[s.connection_id],
+                engine=s.adapter.engine,
+                database=s.adapter.active_database,
+                created_at=s.created_at,
+                last_used_at=s.last_used_at,
+                idle_seconds=round(idle, 2),
+                idle=idle > _IDLE_THRESHOLD_SECONDS,
+                connected=s.adapter.is_connected,
+            )
+        )
+    return out
+
+
+@router.post("/admin/close-all", response_model=CloseSessionsResult, dependencies=[_admin_only])
+async def close_all_sessions(
+    payload: CloseAllSessionsRequest,
+    user: CurrentUser,
+    orchestrator: Annotated[ConnectionOrchestrator, Depends(get_orchestrator)],
+) -> CloseSessionsResult:
+    """Disconnect every live session. By default the admin's own sessions are kept open so they
+    aren't logged out of the tool they're administering."""
+    exclude: set[uuid.UUID] = set()
+    if payload.exclude_self:
+        own = await orchestrator.list_sessions(user_id=user.id)
+        exclude = {s.id for s in own}
+    closed = await orchestrator.close_all_sessions(exclude=exclude)
+    return CloseSessionsResult(closed=closed)
+
+
+@router.delete(
+    "/admin/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    response_model=None,
+    dependencies=[_admin_only],
+)
+async def admin_close_session(
+    session_id: uuid.UUID,
+    orchestrator: Annotated[ConnectionOrchestrator, Depends(get_orchestrator)],
+) -> None:
+    """Disconnect any user's session by id (admin)."""
+    await orchestrator.close_any_session(session_id)
 
 
 @router.delete(

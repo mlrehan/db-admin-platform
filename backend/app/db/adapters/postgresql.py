@@ -25,6 +25,20 @@ class PostgreSQLAdapter(SQLAlchemyAdapter):
         "SELECT prosrc FROM pg_proc WHERE proname = :name "
         "ORDER BY oid LIMIT 1"
     )
+    # Editable-DDL sources (each takes a single :name value, safely bound and cast).
+    object_definition_sql = {
+        "view": (
+            "SELECT 'CREATE OR REPLACE VIEW ' || (:name)::regclass || ' AS\n' "
+            "|| pg_get_viewdef((:name)::regclass, true)"
+        ),
+        "index": "SELECT pg_get_indexdef((:name)::regclass) || ';'",
+        "procedure": "SELECT pg_get_functiondef((:name)::regproc)",
+        "function": "SELECT pg_get_functiondef((:name)::regproc)",
+        "trigger": (
+            "SELECT pg_get_triggerdef(oid) || ';' FROM pg_trigger "
+            "WHERE tgname = :name AND NOT tgisinternal ORDER BY oid LIMIT 1"
+        ),
+    }
 
     def _connect_args(self) -> dict[str, Any]:
         args: dict[str, Any] = {

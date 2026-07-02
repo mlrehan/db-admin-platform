@@ -6,6 +6,7 @@
 
 import { app } from "../core/context.js";
 import { bus, Events } from "../core/events.js";
+import { confirm, toast } from "../core/notify.js";
 import { escapeHtml } from "./view-helpers.js";
 import { makeResizableTable } from "./resizable-table.js";
 
@@ -13,11 +14,14 @@ const PAGE_SIZE = 100;
 const EXPORT_PAGE = 500; // backend max per request
 const EXPORT_CAP = 20000; // safety ceiling for a single export
 
+// `admin: true` columns (the IP addresses) are shown ONLY to admins; non-admins never receive
+// or see any IP column. `public`/`private` distinguish the edge-observed and LAN addresses.
 const COLUMNS = [
   { key: "created_at", label: "Time", get: (l) => new Date(l.created_at).toLocaleString() },
   { key: "user_email", label: "User", get: (l) => l.user_email || "—" },
   { key: "connection_name", label: "Server", get: (l) => l.connection_name || "—" },
-  { key: "ip_address", label: "IP address", get: (l) => l.ip_address || "—" },
+  { key: "ip_address", label: "Public IP", admin: true, get: (l) => l.ip_address || "—" },
+  { key: "ip_private", label: "Private IP", admin: true, get: (l) => l.ip_private || "—" },
   { key: "engine", label: "Engine", get: (l) => l.engine || "" },
   { key: "category", label: "Category", get: (l) => l.category || "" },
   { key: "statement", label: "Statement", get: (l) => l.statement || "" },
@@ -28,6 +32,10 @@ const COLUMNS = [
 
 export class AuditLog extends HTMLElement {
   connectedCallback() {
+    this._isAdmin = app.auth?.user?.role === "admin";
+    // Non-admins never see any IP column; only admins get the public/private IP columns.
+    this._columns = COLUMNS.filter((c) => !c.admin || this._isAdmin);
+
     this.innerHTML = `
       <div class="row" style="padding:12px 16px; border-bottom:1px solid var(--border); gap:8px; flex-wrap:wrap">
         <select class="input" id="f-user" style="width:auto" hidden>
@@ -43,6 +51,7 @@ export class AuditLog extends HTMLElement {
         <label class="row" style="gap:6px">From <input type="date" class="input" id="f-since" style="width:auto"></label>
         <label class="row" style="gap:6px">To <input type="date" class="input" id="f-until" style="width:auto"></label>
         <span class="spacer"></span>
+        <button class="btn btn-danger" id="delete-sel" ${this._isAdmin ? "" : "hidden"} disabled>🗑 Delete</button>
         <button class="btn btn-ghost" id="export-csv">⬇ CSV</button>
         <button class="btn btn-ghost" id="export-xls">⬇ Excel</button>
         <button class="btn" id="reload">Refresh</button>
@@ -57,7 +66,48 @@ export class AuditLog extends HTMLElement {
     );
     this.querySelector("#export-csv").addEventListener("click", () => this._export("csv"));
     this.querySelector("#export-xls").addEventListener("click", () => this._export("xls"));
+    if (this._isAdmin) {
+      this.querySelector("#delete-sel").addEventListener("click", () => this._deleteSelected());
+      // Selection lives inside the scroll box (checkboxes are rendered per row).
+      this._rowsBox.addEventListener("change", (e) => this._onSelectionChange(e));
+    }
     this._init();
+  }
+
+  _selectedIds() {
+    return [...this.querySelectorAll(".sel-row:checked")].map((cb) => cb.dataset.id);
+  }
+
+  _onSelectionChange(e) {
+    if (e.target.id === "sel-all") {
+      const on = e.target.checked;
+      this.querySelectorAll(".sel-row").forEach((cb) => (cb.checked = on));
+    }
+    const count = this._selectedIds().length;
+    const btn = this.querySelector("#delete-sel");
+    if (btn) {
+      btn.disabled = count === 0;
+      btn.textContent = count ? `🗑 Delete (${count})` : "🗑 Delete";
+    }
+  }
+
+  async _deleteSelected() {
+    const ids = this._selectedIds();
+    if (!ids.length) return;
+    const ok = await confirm({
+      title: `Delete ${ids.length} audit record(s)?`,
+      text: "This permanently removes the selected audit entries. This cannot be undone.",
+      confirmText: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const res = await app.api.deleteAuditLogs(ids);
+      toast(`Deleted ${res?.deleted ?? ids.length} record(s)`, "success");
+      this._load();
+    } catch (err) {
+      toast(err?.message || "Delete failed", "error");
+    }
   }
 
   // Resolve connection (server) names, and — for admins — populate the "filter by user" select.
@@ -111,19 +161,39 @@ export class AuditLog extends HTMLElement {
     return f;
   }
 
+  // Render one <td> for a given column key (special-cased styling for a few cells).
+  _cell(l, key) {
+    if (key === "created_at")
+      return `<td class="muted" style="white-space:nowrap">${escapeHtml(new Date(l.created_at).toLocaleString())}</td>`;
+    if (key === "ip_address" || key === "ip_private")
+      return `<td class="mono">${escapeHtml(l[key] || "—")}</td>`;
+    if (key === "engine") return `<td class="muted">${escapeHtml(l.engine || "")}</td>`;
+    if (key === "category") {
+      const cat = { read: "cat-read", write: "cat-write", ddl: "cat-ddl" }[l.category] || "";
+      return `<td><span class="badge ${cat}">${escapeHtml(l.category || "")}</span>${l.destructive ? ' <span class="badge cat-ddl">⚠</span>' : ""}</td>`;
+    }
+    if (key === "statement")
+      return `<td class="mono stmt-cell" style="min-width:280px; max-width:560px; white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere; overflow:visible; text-overflow:clip; user-select:text">${escapeHtml(l.statement)}</td>`;
+    if (key === "result")
+      return l.success
+        ? '<td><span style="color:var(--success)">ok</span></td>'
+        : `<td><span style="color:var(--danger)">${escapeHtml(l.error_code || "fail")}</span></td>`;
+    if (key === "row_count") return `<td class="mono">${l.row_count ?? l.rows_affected ?? ""}</td>`;
+    if (key === "duration_ms") return `<td class="mono">${Math.round(l.duration_ms)}</td>`;
+    const col = this._columns.find((c) => c.key === key);
+    return `<td>${escapeHtml(String(col ? col.get(l) : l[key] ?? ""))}</td>`;
+  }
+
   _row(l) {
-    const cat = { read: "cat-read", write: "cat-write", ddl: "cat-ddl" }[l.category] || "";
-    return `<tr>
-      <td class="muted" style="white-space:nowrap">${escapeHtml(new Date(l.created_at).toLocaleString())}</td>
-      <td>${escapeHtml(l.user_email || "—")}</td>
-      <td>${escapeHtml(l.connection_name || "—")}</td>
-      <td class="mono">${escapeHtml(l.ip_address || "—")}</td>
-      <td class="muted">${escapeHtml(l.engine || "")}</td>
-      <td><span class="badge ${cat}">${escapeHtml(l.category || "")}</span>${l.destructive ? ' <span class="badge cat-ddl">⚠</span>' : ""}</td>
-      <td class="mono stmt-cell" style="min-width:280px; max-width:560px; white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere; overflow:visible; text-overflow:clip; user-select:text">${escapeHtml(l.statement)}</td>
-      <td>${l.success ? '<span style="color:var(--success)">ok</span>' : `<span style="color:var(--danger)">${escapeHtml(l.error_code || "fail")}</span>`}</td>
-      <td class="mono">${l.row_count ?? l.rows_affected ?? ""}</td>
-      <td class="mono">${Math.round(l.duration_ms)}</td></tr>`;
+    const sel = this._isAdmin
+      ? `<td><input type="checkbox" class="sel-row" data-id="${escapeHtml(l.id)}"></td>`
+      : "";
+    return `<tr>${sel}${this._columns.map((c) => this._cell(l, c.key)).join("")}</tr>`;
+  }
+
+  _headerCells() {
+    const sel = this._isAdmin ? '<th><input type="checkbox" id="sel-all" title="Select all"></th>' : "";
+    return sel + this._columns.map((c) => `<th><span class="th-label">${c.label}</span></th>`).join("");
   }
 
   async _load() {
@@ -148,7 +218,7 @@ export class AuditLog extends HTMLElement {
     // rooted to it so "load more" fires on scrolling the table, not the page.
     this._rowsBox.innerHTML = `
       <table class="grid-table wrap" id="audit-table">
-        <thead><tr>${COLUMNS.map((c) => `<th><span class="th-label">${c.label}</span></th>`).join("")}</tr></thead>
+        <thead><tr>${this._headerCells()}</tr></thead>
         <tbody id="auditbody">${logs.map((l) => this._row(l)).join("")}</tbody>
       </table>
       <div id="audit-sentinel" class="muted" style="padding:12px; text-align:center"></div>`;
@@ -227,9 +297,9 @@ export class AuditLog extends HTMLElement {
       }
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
       if (format === "csv") {
-        downloadBlob(toCsv(rows), `audit-log-${stamp}.csv`, "text/csv;charset=utf-8");
+        downloadBlob(toCsv(rows, this._columns), `audit-log-${stamp}.csv`, "text/csv;charset=utf-8");
       } else {
-        downloadBlob(toExcelHtml(rows), `audit-log-${stamp}.xls`, "application/vnd.ms-excel");
+        downloadBlob(toExcelHtml(rows, this._columns), `audit-log-${stamp}.xls`, "application/vnd.ms-excel");
       }
       bus.emit(Events.TOAST, { message: `Exported ${rows.length} row(s)`, kind: "success" });
     } catch (err) {
@@ -241,20 +311,20 @@ export class AuditLog extends HTMLElement {
   }
 }
 
-function toCsv(rows) {
+function toCsv(rows, columns = COLUMNS) {
   const esc = (v) => {
     const s = String(v ?? "");
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const header = COLUMNS.map((c) => esc(c.label)).join(",");
-  const body = rows.map((r) => COLUMNS.map((c) => esc(c.get(r))).join(",")).join("\n");
+  const header = columns.map((c) => esc(c.label)).join(",");
+  const body = rows.map((r) => columns.map((c) => esc(c.get(r))).join(",")).join("\n");
   return "﻿" + header + "\n" + body; // BOM so Excel reads UTF-8 correctly
 }
 
-function toExcelHtml(rows) {
+function toExcelHtml(rows, columns = COLUMNS) {
   const cell = (v) => `<td>${escapeHtml(String(v ?? ""))}</td>`;
-  const head = COLUMNS.map((c) => `<th>${escapeHtml(c.label)}</th>`).join("");
-  const body = rows.map((r) => `<tr>${COLUMNS.map((c) => cell(c.get(r))).join("")}</tr>`).join("");
+  const head = columns.map((c) => `<th>${escapeHtml(c.label)}</th>`).join("");
+  const body = rows.map((r) => `<tr>${columns.map((c) => cell(c.get(r))).join("")}</tr>`).join("");
   return `<html><head><meta charset="utf-8"></head><body><table border="1"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></body></html>`;
 }
 

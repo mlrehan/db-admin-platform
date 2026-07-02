@@ -16,7 +16,7 @@ from app.auth.dependencies import get_user_service, require_permissions
 from app.auth.roles import Permission
 from app.core.exceptions import ConflictError, NotFoundError
 from app.models.user import User
-from app.schemas.user import UserCreate, UserRead, UserUpdate
+from app.schemas.user import AdminPasswordReset, UserCreate, UserRead, UserUpdate
 from app.services.user_service import UserService
 
 router = APIRouter(tags=["users"])
@@ -78,6 +78,25 @@ async def update_user(
         role=payload.role,
         is_active=payload.is_active,
     )
+
+
+@router.post(
+    "/{user_id}/reset-password",
+    response_model=UserRead,
+    dependencies=[_admin_only],
+)
+async def reset_user_password(
+    user_id: uuid.UUID,
+    payload: AdminPasswordReset,
+    service: Annotated[UserService, Depends(get_user_service)],
+) -> User:
+    """Admin resets another user's password. All the target user's existing sessions/tokens are
+    revoked (``token_version`` bumped) so a compromised session can't outlive the reset."""
+    user = await service.get_by_id(user_id)
+    if user is None:
+        raise NotFoundError("User not found.")
+    await service.change_password(user, new_password=payload.new_password, revoke_sessions=True)
+    return user
 
 
 @router.delete(

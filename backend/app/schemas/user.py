@@ -40,6 +40,12 @@ class PasswordChange(BaseModel):
     new_password: str = Field(min_length=12, max_length=128)
 
 
+class AdminPasswordReset(BaseModel):
+    """Admin-initiated password reset for another user (no current-password required)."""
+
+    new_password: str = Field(min_length=12, max_length=128)
+
+
 class UserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

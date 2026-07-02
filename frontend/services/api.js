@@ -48,6 +48,16 @@ export class Api {
   closeSession(id) {
     return this.http.delete(`/sessions/${id}`);
   }
+  // Admin: oversight of every user's live sessions.
+  listAllSessions() {
+    return this.http.get("/sessions/admin/all");
+  }
+  adminCloseSession(id) {
+    return this.http.delete(`/sessions/admin/${id}`);
+  }
+  adminCloseAllSessions(excludeSelf = true) {
+    return this.http.post("/sessions/admin/close-all", { exclude_self: excludeSelf });
+  }
 
   // --- query (buffered) ---
   executeQuery(sessionId, sql, params, maxRows) {
@@ -122,6 +132,9 @@ export class Api {
   deleteUser(id) {
     return this.http.delete(`/users/${id}`);
   }
+  resetUserPassword(id, newPassword) {
+    return this.http.post(`/users/${id}/reset-password`, { new_password: newPassword });
+  }
 
   // --- access grants (granular RBAC) ---
   listGrantableOperations() {
@@ -141,11 +154,21 @@ export class Api {
     return this.http.delete(`/access/grants/${id}`);
   }
 
+  // --- object definition (editable ALTER script) ---
+  getObjectDefinition(sessionId, { objectType, name, schema } = {}) {
+    const params = new URLSearchParams({ object_type: objectType, name });
+    if (schema) params.set("schema", schema);
+    return this.http.get(`/sessions/${sessionId}/object-definition?${params.toString()}`);
+  }
+
   // --- audit ---
   listAuditLogs(filters = {}) {
     const q = new URLSearchParams(
       Object.entries(filters).filter(([, v]) => v !== undefined && v !== null)
     ).toString();
     return this.http.get(`/audit/logs${q ? `?${q}` : ""}`);
+  }
+  deleteAuditLogs(ids) {
+    return this.http.post("/audit/logs/delete", { ids });
   }
 }

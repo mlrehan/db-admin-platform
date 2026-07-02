@@ -54,6 +54,14 @@ class MSSQLAdapter(SQLAlchemyAdapter):
     script_mode = "batch"
     databases_sql = "SELECT name FROM sys.databases"
     routine_definition_sql = "SELECT OBJECT_DEFINITION(OBJECT_ID(:name))"
+    # View/procedure/function/trigger definitions all come from OBJECT_DEFINITION uniformly.
+    # (Indexes are surfaced via the reconstructed CREATE TABLE script instead.)
+    object_definition_sql = {
+        "view": "SELECT OBJECT_DEFINITION(OBJECT_ID(:name))",
+        "procedure": "SELECT OBJECT_DEFINITION(OBJECT_ID(:name))",
+        "function": "SELECT OBJECT_DEFINITION(OBJECT_ID(:name))",
+        "trigger": "SELECT OBJECT_DEFINITION(OBJECT_ID(:name))",
+    }
     hidden_databases = frozenset({"master", "tempdb", "model", "msdb"})
     # SQL Server system schemas + the fixed database-role schemas (no user objects).
     system_schemas = frozenset(

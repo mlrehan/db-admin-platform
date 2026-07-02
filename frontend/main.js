@@ -14,6 +14,7 @@ import "./components/ui-toast.js";
 import "./components/app-root.js";
 import { initTheme } from "./core/theme.js";
 import { initNotify } from "./core/notify.js";
+import { initLoadingBar } from "./core/loading-bar.js";
 import { startIdleTimer, stopIdleTimer } from "./core/idle-timeout.js";
 import "./modules/auth/login-view.js";
 import "./modules/connections/dashboard-view.js";
@@ -56,6 +57,7 @@ const ROUTES = [
 async function bootstrap() {
   initTheme();
   initNotify();
+  initLoadingBar();
   // HTTP client wired to auth for token attach + refresh-and-retry on 401.
   const http = new HttpClient({
     baseUrl: config.apiBase,
