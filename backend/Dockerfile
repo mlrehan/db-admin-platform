@@ -41,8 +41,9 @@ RUN pip install . && pip install "alembic>=1.13"
 
 COPY . .
 
-# Run as a non-root user; ensure the entrypoint is executable regardless of host FS bits.
-RUN chmod +x docker-entrypoint.sh \
+# Run as a non-root user; strip potential Windows CRLF and ensure the entrypoint is executable.
+RUN sed -i 's/\r$//' docker-entrypoint.sh \
+    && chmod +x docker-entrypoint.sh \
     && useradd --create-home --uid 1000 appuser \
     && chown -R appuser:appuser /app
 USER appuser
