@@ -1,0 +1,187 @@
+# Enterprise DB Admin Platform — Windows 11 Development Stack
+#
+# Quick start (core platform: PostgreSQL control plane + FastAPI backend + Nginx/SPA frontend):
+#   docker compose -f docker-compose.dev.yml up -d --build
+#
+# Full stack including containerized MSSQL & MySQL target databases:
+#   docker compose -f docker-compose.dev.yml --profile dbs up -d --build
+#
+# Dedicated Non-Default Host Ports (avoids 8000, 8080, 5432, 3306, 1433, 6379, 3000):
+#   - Frontend SPA + API Proxy : http://localhost:${FRONTEND_PORT:-18480}  (-> container :80)
+#   - FastAPI Backend + /docs  : http://localhost:${BACKEND_PORT:-18400}   (-> container :8000)
+#   - Control-Plane PostgreSQL : localhost:${CONTROL_DB_HOST_PORT:-15432}  (-> container :5432)
+#   - Target MySQL (--profile) : localhost:${MYSQL_HOST_PORT:-13306}       (-> container :3306)
+#   - Target MSSQL (--profile) : localhost:${MSSQL_HOST_PORT:-15333}       (-> container :1433)
+#
+# Windows 11 Developer Features:
+#   - Maps `host.docker.internal:host-gateway` into `backend` so you can connect from the
+#     Enterprise SQL Workspace to databases running directly on your Windows 11 host.
+#   - Enables `APP_ENVIRONMENT=development`, `APP_DEBUG=true` (unlocking Swagger `/docs`),
+#     console logging, and live bind-mounts for both backend Python code and frontend ES modules.
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CONTROL_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${CONTROL_DB_PASSWORD:?set CONTROL_DB_PASSWORD in .env}
+      POSTGRES_DB: ${CONTROL_DB_NAME:-db_admin_platform}
+    ports:
+      - "${CONTROL_DB_HOST_PORT:-15432}:5432"
+    volumes:
+      - pgdata_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CONTROL_DB_USER:-postgres} -d ${CONTROL_DB_NAME:-db_admin_platform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - internal
+
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      APP_ENVIRONMENT: development
+      APP_DEBUG: "true"
+      SERVER_FORWARDED_ALLOW_IPS: "*"
+      CONTROL_DB_HOST: postgres
+      CONTROL_DB_PORT: "5432"
+      CONTROL_DB_USER: ${CONTROL_DB_USER:-postgres}
+      CONTROL_DB_PASSWORD: ${CONTROL_DB_PASSWORD:?set CONTROL_DB_PASSWORD in .env}
+      CONTROL_DB_NAME: ${CONTROL_DB_NAME:-db_admin_platform}
+      SECURITY_JWT_SECRET: ${SECURITY_JWT_SECRET:?set SECURITY_JWT_SECRET in .env}
+      SECURITY_MASTER_ENCRYPTION_KEY: ${SECURITY_MASTER_ENCRYPTION_KEY:?set SECURITY_MASTER_ENCRYPTION_KEY in .env}
+      API_CORS_ORIGINS: ${API_CORS_ORIGINS:-http://localhost:18480,http://127.0.0.1:18480}
+      LOG_FORMAT: console
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+
+      # Optional containerized target DBs (when started with `--profile dbs`)
+      MSSQL_HOST: mssql
+      MSSQL_PORT: "1433"
+      MSSQL_USER: sa
+      MSSQL_PASSWORD: ${MSSQL_SA_PASSWORD:-Strong@12345}
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${MYSQL_USER:-app_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-App@12345}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-app_db}
+    volumes:
+      - ./backend/app:/app/app:ro
+      - ./backend/alembic:/app/alembic:ro
+      - ./backend/alembic.ini:/app/alembic.ini:ro
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+        "--reload-dir",
+        "/app/app",
+        "--proxy-headers",
+      ]
+    ports:
+      - "${BACKEND_PORT:-18400}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - internal
+
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./frontend/index.html:/usr/share/nginx/html/index.html:ro
+      - ./frontend/main.js:/usr/share/nginx/html/main.js:ro
+      - ./frontend/config.docker.js:/usr/share/nginx/html/config.js:ro
+      - ./frontend/assets:/usr/share/nginx/html/assets:ro
+      - ./frontend/components:/usr/share/nginx/html/components:ro
+      - ./frontend/core:/usr/share/nginx/html/core:ro
+      - ./frontend/modules:/usr/share/nginx/html/modules:ro
+      - ./frontend/services:/usr/share/nginx/html/services:ro
+      - ./frontend/styles:/usr/share/nginx/html/styles:ro
+      - ./frontend/utils:/usr/share/nginx/html/utils:ro
+    ports:
+      - "${FRONTEND_PORT:-18480}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - internal
+
+
+  # Optional target databases for local testing (activate with `--profile dbs`)
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    profiles: ["dbs", "full"]
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: "Developer"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-Strong@12345}
+    ports:
+      - "${MSSQL_HOST_PORT:-15333}:1433"
+    volumes:
+      - mssql_data_dev:/var/opt/mssql
+      - mssql_backup_dev:/var/opt/mssql/backup
+    networks:
+      - internal
+
+  mysql:
+    image: mysql:8.0
+    profiles: ["dbs", "full"]
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-Root@12345}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-app_db}
+      MYSQL_USER: ${MYSQL_USER:-app_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-App@12345}
+    ports:
+      - "${MYSQL_HOST_PORT:-13306}:3306"
+    volumes:
+      - mysql_data_dev:/var/lib/mysql
+    networks:
+      - internal
+
+
+volumes:
+  pgdata_dev:
+  mssql_data_dev:
+  mssql_backup_dev:
+  mysql_data_dev:
+
+
+networks:
+  internal:
+    driver: bridge

@@ -8,13 +8,16 @@ export class Router {
    * @param {Array<{path:string, view:string, requiresAuth?:boolean, roles?:string[]}>} opts.routes
    * @param {(ctx)=>void} opts.onNavigate  Called with the resolved route + params.
    * @param {()=>({authenticated:boolean, role?:string})} opts.guard  Auth state provider.
+   * @param {string} [opts.authHome]  Default post-login route for authenticated users.
    * @param {Window} [opts.window]
    */
-  constructor({ routes, onNavigate, guard, window: win = globalThis }) {
+  constructor({ routes, onNavigate, guard, authHome = null, window: win = globalThis }) {
     this.routes = routes.map((r) => ({ ...r, matcher: compilePath(r.path) }));
     this.onNavigate = onNavigate;
     this.guard = guard || (() => ({ authenticated: true }));
+    this.authHome = authHome;
     this.window = win;
+    this._returnTo = null;
     this._handler = () => this.resolve();
   }
 
@@ -25,6 +28,18 @@ export class Router {
 
   stop() {
     this.window.removeEventListener("hashchange", this._handler);
+  }
+
+  defaultAuthHome() {
+    if (this.authHome) return this.authHome;
+    const firstAuthed = this.routes.find((r) => r.requiresAuth);
+    return firstAuthed ? firstAuthed.path : "/";
+  }
+
+  consumeReturnTo() {
+    const target = this._returnTo;
+    this._returnTo = null;
+    return target;
   }
 
   navigate(path) {
@@ -64,6 +79,7 @@ export class Router {
     const { route, params, query } = matched;
 
     if (route.requiresAuth && !auth.authenticated) {
+      this._returnTo = path;
       this.navigate("/login");
       return;
     }
@@ -73,7 +89,7 @@ export class Router {
     }
     // Already-authenticated users shouldn't sit on the login screen.
     if (route.path === "/login" && auth.authenticated) {
-      this.navigate("/");
+      this.navigate(this.consumeReturnTo() || this.defaultAuthHome());
       return;
     }
     this.onNavigate({ status: "ok", route, params, query });

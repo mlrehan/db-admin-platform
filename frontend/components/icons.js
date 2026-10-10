@@ -26,4 +26,9 @@ export const icons = {
   menu: svg('<path d="M3 6h18M3 12h18M3 18h18"/>'),
   activity: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
   diagram: svg('<rect x="3" y="3" width="7" height="5" rx="1"/><rect x="14" y="16" width="7" height="5" rx="1"/><path d="M6.5 8v4a2 2 0 0 0 2 2H17"/>'),
+  play: svg('<polygon points="6 4 20 12 6 20 6 4"/>'),
+  reset: svg('<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>'),
+  terminal: svg('<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>'),
+  arrowRight: svg('<line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>'),
+  arrowLeft: svg('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
 };

@@ -7,4 +7,5 @@ window.__APP_CONFIG__ = {
   agGridBase: "/vendor/ag-grid",
   swalBase: "/vendor/sweetalert2",
   tomSelectBase: "/vendor/tom-select/dist",
+  sqlJsBase: "/vendor/sql.js/dist",
 };

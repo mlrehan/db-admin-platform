@@ -1,10 +1,12 @@
-# Enterprise DB Admin Platform — full stack.
-#   docker compose up --build
+# Enterprise DB Admin Platform — Production Stack (Linux / Ubuntu Server)
+#   docker compose up -d --build
 #
-# Services:
-#   postgres  — control-plane database (platform's own state; NOT a target database)
-#   backend   — FastAPI app; runs migrations + admin bootstrap on start
-#   frontend  — nginx serving the SPA and proxying /api + /ws to the backend
+# Services & Default Host Ports (non-conflicting high ports):
+#   postgres  — control-plane database (internal network only; no host port bound in production)
+#   mssql     — target SQL Server 2022 Developer instance (host port ${MSSQL_HOST_PORT:-15333} -> 1433)
+#   mysql     — target MySQL 8.0 instance (host port ${MYSQL_HOST_PORT:-13306} -> 3306)
+#   backend   — FastAPI app (host port ${BACKEND_PORT:-18400} -> 8000)
+#   frontend  — nginx serving the SPA + reverse proxy (host port ${FRONTEND_PORT:-18480} -> 80)
 #
 # Copy .env.example to .env and set the secrets before starting.
 
@@ -15,58 +17,62 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${CONTROL_DB_USER:-dbadmin}
-      POSTGRES_PASSWORD: ${CONTROL_DB_PASSWORD}
+      POSTGRES_PASSWORD: ${CONTROL_DB_PASSWORD:?set CONTROL_DB_PASSWORD in .env}
       POSTGRES_DB: ${CONTROL_DB_NAME:-db_admin_platform}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CONTROL_DB_USER:-dbadmin} -d ${CONTROL_DB_NAME:-db_admin_platform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
     networks:
       - internal
 
 
   # =========================
-  # MSSQL (CHANGED PORT!)
+  # MSSQL (Target Database)
   # =========================
   mssql:
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: mssql-db
     restart: unless-stopped
-
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_PID: "Developer"
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-Strong@12345}
-
     ports:
-      - "15333:1433"
-
+      - "${MSSQL_HOST_PORT:-15333}:1433"
     volumes:
       - mssql_data:/var/opt/mssql
       - mssql_backup:/var/opt/mssql/backup
-
     networks:
       - internal
 
 
   # =========================
-  # MYSQL (NEW)
+  # MYSQL (Target Database)
   # =========================
   mysql:
     image: mysql:8.0
     container_name: mysql-db
     restart: unless-stopped
-
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-Root@12345}
-      MYSQL_DATABASE: app_db
-      MYSQL_USER: app_user
-      MYSQL_PASSWORD: App@12345
-
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-app_db}
+      MYSQL_USER: ${MYSQL_USER:-app_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-App@12345}
     ports:
-      - "3307:3306"   # 🔥 host port changed
-
+      - "${MYSQL_HOST_PORT:-13306}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     networks:
       - internal
 
@@ -74,46 +80,57 @@ services:
   backend:
     build: ./backend
     restart: unless-stopped
-
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       mssql:
         condition: service_started
       mysql:
         condition: service_started
-
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       APP_ENVIRONMENT: production
+      SERVER_FORWARDED_ALLOW_IPS: "*"
       CONTROL_DB_HOST: postgres
       CONTROL_DB_PORT: "5432"
       CONTROL_DB_USER: ${CONTROL_DB_USER:-dbadmin}
-      CONTROL_DB_PASSWORD: ${CONTROL_DB_PASSWORD}
+      CONTROL_DB_PASSWORD: ${CONTROL_DB_PASSWORD:?set CONTROL_DB_PASSWORD in .env}
       CONTROL_DB_NAME: ${CONTROL_DB_NAME:-db_admin_platform}
       SECURITY_JWT_SECRET: ${SECURITY_JWT_SECRET:?set SECURITY_JWT_SECRET in .env}
       SECURITY_MASTER_ENCRYPTION_KEY: ${SECURITY_MASTER_ENCRYPTION_KEY:?set SECURITY_MASTER_ENCRYPTION_KEY in .env}
-      API_CORS_ORIGINS: ${API_CORS_ORIGINS:-http://localhost:8080}
+      API_CORS_ORIGINS: ${API_CORS_ORIGINS:-http://localhost:18480,http://127.0.0.1:18480}
       LOG_FORMAT: json
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
 
-      # MSSQL (IMPORTANT: internal port stays 1433)
+      # MSSQL (internal container port stays 1433)
       MSSQL_HOST: mssql
       MSSQL_PORT: "1433"
       MSSQL_USER: sa
       MSSQL_PASSWORD: ${MSSQL_SA_PASSWORD:-Strong@12345}
 
-      # MYSQL
+      # MYSQL (internal container port stays 3306)
       MYSQL_HOST: mysql
       MYSQL_PORT: "3306"
-      MYSQL_USER: app_user
-      MYSQL_PASSWORD: App@12345
-      MYSQL_DATABASE: app_db
-
+      MYSQL_USER: ${MYSQL_USER:-app_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-App@12345}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-app_db}
     ports:
-      - "8000:8000"
-
+      - "${BACKEND_PORT:-18400}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
     networks:
       - internal
 
@@ -121,8 +138,17 @@ services:
   frontend:
     build: ./frontend
     restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
     ports:
-      - "8080:80"
+      - "${FRONTEND_PORT:-18480}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
     networks:
       - internal
 

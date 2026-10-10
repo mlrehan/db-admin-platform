@@ -23,6 +23,11 @@ export class LoginView extends HTMLElement {
               autocomplete="current-password" placeholder="••••••••" required />
           </div>
           <button class="btn btn-primary" id="submit" style="width:100%">Sign in</button>
+          <div class="login-footer-links">
+            <a href="#/" class="login-back-link" id="login-back-home">← Back to SQL Studio</a>
+            <span class="muted">&middot;</span>
+            <a href="#/playground" class="login-back-link" id="login-to-playground">SQL Playground</a>
+          </div>
         </form>
       </div>`;
 
@@ -44,7 +49,13 @@ export class LoginView extends HTMLElement {
     try {
       await app.auth.login(email, password);
       bus.emit(Events.TOAST, { message: "Welcome back", kind: "success" });
-      app.router.navigate("/");
+      if (app.router?.currentPath() === "/login") {
+        const dest =
+          app.router.consumeReturnTo?.() ||
+          app.router.defaultAuthHome?.() ||
+          "/workspace";
+        app.router.navigate(dest);
+      }
     } catch (err) {
       this._err.textContent =
         err?.code === "AUTHENTICATION_ERROR"

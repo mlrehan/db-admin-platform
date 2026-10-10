@@ -6,13 +6,15 @@ FROM node:20-alpine AS vendor
 WORKDIR /build
 RUN npm init -y >/dev/null 2>&1 \
     && npm install --no-audit --no-fund --silent \
-       monaco-editor@0.52.2 ag-grid-community@31.3.4 sweetalert2@11 tom-select@2.3.1
-RUN mkdir -p /out/monaco /out/ag-grid /out/sweetalert2/dist /out/tom-select/dist \
+       monaco-editor@0.52.2 ag-grid-community@31.3.4 sweetalert2@11 tom-select@2.3.1 sql.js@1.12.0
+RUN mkdir -p /out/monaco /out/ag-grid /out/sweetalert2/dist /out/tom-select/dist /out/sql.js/dist \
     && cp -r node_modules/monaco-editor/min /out/monaco/min \
     && cp -r node_modules/ag-grid-community/. /out/ag-grid/ \
     && cp node_modules/sweetalert2/dist/sweetalert2.min.js /out/sweetalert2/dist/ \
     && cp node_modules/sweetalert2/dist/sweetalert2.min.css /out/sweetalert2/dist/ \
-    && cp -r node_modules/tom-select/dist/. /out/tom-select/dist/
+    && cp -r node_modules/tom-select/dist/. /out/tom-select/dist/ \
+    && cp node_modules/sql.js/dist/sql-wasm.js /out/sql.js/dist/ \
+    && cp node_modules/sql.js/dist/sql-wasm.wasm /out/sql.js/dist/
 
 # --- stage 2: nginx static server ---
 FROM nginx:1.27-alpine

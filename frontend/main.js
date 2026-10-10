@@ -16,14 +16,21 @@ import { initTheme } from "./core/theme.js";
 import { initNotify } from "./core/notify.js";
 import { initLoadingBar } from "./core/loading-bar.js";
 import { startIdleTimer, stopIdleTimer } from "./core/idle-timeout.js";
+import "./modules/landing/landing-view.js";
 import "./modules/auth/login-view.js";
 import "./modules/connections/dashboard-view.js";
 
-// Heavier feature views (and their Monaco/AG Grid/WebSocket deps) are loaded on demand the
-// first time their route is visited — keeping the initial load small and fast.
-const ROUTES = [
+// Heavier feature views (and their Monaco/AG Grid/WebSocket/SQLite WASM deps) are loaded on
+// demand the first time their route is visited — keeping the initial load small and fast.
+export const ROUTES = [
+  { path: "/", view: "landing-view" },
+  {
+    path: "/playground", view: "playground-view",
+    load: () => import("./modules/playground/playground-view.js"),
+  },
   { path: "/login", view: "login-view" },
-  { path: "/", view: "dashboard-view", requiresAuth: true },
+  { path: "/workspace", view: "dashboard-view", requiresAuth: true },
+  { path: "/dashboard", view: "dashboard-view", requiresAuth: true },
   {
     path: "/connections", view: "connections-view", requiresAuth: true,
     load: () => import("./modules/connections/connections-view.js"),
@@ -80,6 +87,7 @@ async function bootstrap() {
 
   app.router = new Router({
     routes: ROUTES,
+    authHome: "/workspace",
     guard: () => ({
       authenticated: app.auth.isAuthenticated(),
       role: app.auth.user?.role,

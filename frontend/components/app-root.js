@@ -13,7 +13,7 @@ import { openSessions } from "../modules/sessions/sessions.js";
 import { getTheme, toggleTheme } from "../core/theme.js";
 
 const NAV = [
-  { path: "/", icon: "home", label: "Overview", view: "dashboard-view" },
+  { path: "/workspace", icon: "home", label: "Overview", view: "dashboard-view" },
   { path: "/connections", icon: "database", label: "Connections", view: "connections-view" },
   { path: "/editor", icon: "editor", label: "SQL Editor", view: "editor-view" },
   { path: "/schema", icon: "schema", label: "Schema Explorer", view: "schema-view" },
@@ -25,7 +25,7 @@ const NAV = [
 
 export class AppRoot extends HTMLElement {
   connectedCallback() {
-    this._mode = null; // "login" | "shell"
+    this._mode = null; // standalone view tag | "shell" | "bare"
     this._unsub = bus.on(Events.AUTH_CHANGED, () => app.router?.resolve());
   }
 
@@ -40,13 +40,14 @@ export class AppRoot extends HTMLElement {
       return;
     }
     const { route } = ctx;
-    if (route.path === "/login") {
-      this._renderLogin();
+    if (!route.requiresAuth) {
+      await this._renderStandalone(route);
       return;
     }
     this._renderShell();
-    this._setActiveNav(route.path);
-    this._setTitle(NAV.find((n) => n.path === route.path)?.label || config.appName);
+    const activePath = route.path === "/dashboard" ? "/workspace" : route.path;
+    this._setActiveNav(activePath);
+    this._setTitle(NAV.find((n) => n.path === activePath)?.label || config.appName);
     // Lazily import the view module on first visit (defers Monaco/AG Grid/etc.).
     if (route.load) {
       try {
@@ -58,13 +59,21 @@ export class AppRoot extends HTMLElement {
     this._setOutlet(document.createElement(route.view));
   }
 
-  // --- login mode ----------------------------------------------------------------------
+  // --- public standalone mode (landing / playground / login) ---------------------------
 
-  _renderLogin() {
-    if (this._mode === "login") return;
-    this._mode = "login";
+  async _renderStandalone(route) {
+    if (route.load) {
+      try {
+        await route.load();
+      } catch (err) {
+        console.error("Failed to load view", route.view, err);
+      }
+    }
+    if (this._mode === route.view && this.querySelector(route.view)) return;
+    this._mode = route.view;
+    this._outlet = null;
     this.innerHTML = "";
-    this.appendChild(document.createElement("login-view"));
+    this.appendChild(document.createElement(route.view));
   }
 
   // --- shell mode ----------------------------------------------------------------------
@@ -215,9 +224,9 @@ export class AppRoot extends HTMLElement {
   _ensureShellOrBare() {
     if (app.auth?.isAuthenticated()) {
       this._renderShell();
-    } else if (this._mode !== "shell") {
+    } else {
       this._mode = "bare";
-      this.innerHTML = `<main class="app-main">${""}</main>`;
+      this.innerHTML = `<main class="app-main" style="height:100vh"></main>`;
       this._outlet = this.querySelector("main");
     }
   }
@@ -246,7 +255,10 @@ export class AppRoot extends HTMLElement {
         ? "You don’t have access to this section."
         : "Page not found.";
     el.innerHTML = `<div class="panel"><div class="placeholder">
-      <div class="ph-icon">∅</div><div>${msg}</div></div></div>`;
+      <div class="ph-icon">∅</div>
+      <div>${msg}</div>
+      <a href="#/" class="btn" style="margin-top:8px;text-decoration:none">← Back to SQL Studio</a>
+    </div></div>`;
     return el;
   }
 }
