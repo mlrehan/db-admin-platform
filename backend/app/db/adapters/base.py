@@ -110,15 +110,26 @@ class ScriptResultSet:
 
 @dataclass(frozen=True)
 class ScriptRun:
-    """Outcome of running a whole script as one session: every result set, plus row-count
-    messages from non-returning statements (INSERT/UPDATE/DDL/…). ``error`` is set when a
-    statement failed mid-script — the result sets produced *before* the failure are still
-    returned (SSMS-style: show the results plus the error)."""
+    """Outcome of running a whole script as one session: every result set, plus row-count /
+    informational messages (INSERT/UPDATE/DDL row counts, ``PRINT`` output, batch notices).
+
+    ``errors`` lists every failure, each attributed to its batch for multi-batch (``GO``)
+    scripts — result sets produced before/after a failing batch are still returned
+    (SSMS-style). ``error`` is the first error, kept for backward compatibility.
+    ``database_changed_to`` is set when the script switched the session's database (``USE``),
+    and ``open_transaction`` when the script left an explicit transaction open."""
 
     result_sets: list[ScriptResultSet]
     messages: list[str]
     execution_ms: float
     error: str | None = None
+    errors: list[str] = field(default_factory=list)
+    database_changed_to: str | None = None
+    open_transaction: bool = False
+
+    @property
+    def all_errors(self) -> list[str]:
+        return list(self.errors) or ([self.error] if self.error else [])
 
 
 class DatabaseAdapter(ABC):

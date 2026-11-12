@@ -1,4 +1,10 @@
-"""Shared API dependencies for Phase 3 (connections & live sessions)."""
+"""Shared API dependencies for Phase 3 (connections & live sessions).
+
+These providers are ``async def`` on purpose even though they never await: FastAPI runs a
+plain ``def`` dependency in a worker thread (anyio pool, 40 tokens by default), so ~20
+trivial providers per request became 20 thread hops — measurable queueing with 100
+concurrent users. They do no blocking I/O, so running them inline on the loop is free.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +26,7 @@ from app.services.orchestrator import ConnectionOrchestrator
 from app.services.query_engine import QueryEngine
 
 
-def get_connection_service(
+async def get_connection_service(
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> ConnectionService:
@@ -31,31 +37,31 @@ def get_connection_service(
 
 # HTTPConnection is the common base of Request (HTTP) and WebSocket, so these dependencies
 # resolve correctly for both REST and WebSocket routes.
-def get_orchestrator(conn: HTTPConnection) -> ConnectionOrchestrator:
+async def get_orchestrator(conn: HTTPConnection) -> ConnectionOrchestrator:
     orchestrator = getattr(conn.app.state, "orchestrator", None)
     if orchestrator is None:  # pragma: no cover - misconfiguration guard
         raise ServiceUnavailableError("Connection orchestrator is not initialized.")
     return orchestrator
 
 
-def get_query_engine(conn: HTTPConnection) -> QueryEngine:
+async def get_query_engine(conn: HTTPConnection) -> QueryEngine:
     engine = getattr(conn.app.state, "query_engine", None)
     if engine is None:  # pragma: no cover - misconfiguration guard
         raise ServiceUnavailableError("Query engine is not initialized.")
     return engine
 
 
-def get_metadata_service() -> MetadataService:
+async def get_metadata_service() -> MetadataService:
     return MetadataService()
 
 
-def get_audit_service(
+async def get_audit_service(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AuditService:
     return AuditService(session)
 
 
-def get_access_service(
+async def get_access_service(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AccessControlService:
     return AccessControlService(session)

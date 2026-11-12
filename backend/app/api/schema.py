@@ -32,12 +32,19 @@ from app.db.adapters.metadata import (
     TableInfo,
 )
 from app.schemas.metadata import (
+    CatalogColumnOut,
+    CatalogObjectOut,
+    CatalogOut,
+    CatalogRoutineOut,
     ColumnOut,
     CreateDatabaseRequest,
     DatabaseOut,
     ForeignKeyOut,
     IndexOut,
+    JunctionOut,
     ObjectDefinitionOut,
+    RelationshipOut,
+    RelationshipsOut,
     RoutineOut,
     SchemaOut,
     SwitchDatabaseRequest,
@@ -257,6 +264,103 @@ async def list_routines(
     session = await _resolve_session(orchestrator, session_id, user.id)
     routines: list[RoutineInfo] = await metadata.list_routines(session, schema)
     return [RoutineOut(name=r.name, kind=r.kind, return_type=r.return_type) for r in routines]
+
+
+@router.get(
+    "/sessions/{session_id}/catalog",
+    response_model=CatalogOut,
+    dependencies=[_can_read],
+)
+async def get_catalog(
+    session_id: uuid.UUID,
+    user: CurrentUser,
+    orchestrator: Annotated[ConnectionOrchestrator, Depends(get_orchestrator)],
+    metadata: Annotated[MetadataService, Depends(get_metadata_service)],
+    access: Annotated[AccessControlService, Depends(get_access_service)],
+) -> CatalogOut:
+    """All tables/views (with columns) and routines of the session's active database, for SQL
+    IntelliSense — one cached round trip instead of a describe call per table.
+
+    Served from the shared metadata cache, then filtered **per caller**: a non-admin only
+    receives objects their access grants let them see, and never engine system schemas."""
+    session = await _resolve_session(orchestrator, session_id, user.id)
+    policy = await access.policy_for(user, session.connection_id)
+    catalog = await metadata.get_catalog(session)
+    adapter = session.adapter
+    database = adapter.active_database
+    is_system = getattr(adapter, "is_system_schema", lambda _s: False)
+
+    def visible_schema(schema: str | None) -> bool:
+        return policy.is_admin or not is_system(schema)
+
+    objects = [
+        CatalogObjectOut(
+            schema_name=o.schema,
+            name=o.name,
+            kind=o.kind,
+            columns=[
+                CatalogColumnOut(name=c.name, type=c.data_type, nullable=c.nullable)
+                for c in o.columns
+            ],
+        )
+        for o in catalog.objects
+        if visible_schema(o.schema) and policy.table_visible(database, o.schema, o.name)
+    ]
+    routines = [
+        CatalogRoutineOut(schema_name=r.schema, name=r.name, kind=r.kind)
+        for r in catalog.routines
+        if visible_schema(r.schema) and (policy.is_admin or policy.has_grants)
+    ]
+    return CatalogOut(
+        dialect=adapter.engine.value,
+        database=database,
+        default_schema=catalog.default_schema,
+        objects=objects,
+        routines=routines,
+        truncated=catalog.truncated,
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/relationships",
+    response_model=RelationshipsOut,
+    dependencies=[_can_read],
+)
+async def get_relationships(
+    session_id: uuid.UUID,
+    user: CurrentUser,
+    orchestrator: Annotated[ConnectionOrchestrator, Depends(get_orchestrator)],
+    metadata: Annotated[MetadataService, Depends(get_metadata_service)],
+    access: Annotated[AccessControlService, Depends(get_access_service)],
+) -> RelationshipsOut:
+    """All foreign-key relationships of the active database with cardinality, and many-to-many
+    junction tables — the database diagram's source of truth. Only relationships whose BOTH
+    tables the caller may see are returned."""
+    session = await _resolve_session(orchestrator, session_id, user.id)
+    policy = await access.policy_for(user, session.connection_id)
+    graph = await metadata.get_relationships(session)
+    db = session.adapter.active_database
+
+    def visible(schema: str | None, table: str) -> bool:
+        return policy.table_visible(db, schema, table)
+
+    return RelationshipsOut(
+        relationships=[
+            RelationshipOut(
+                name=r.name, child_schema=r.child_schema, child_table=r.child_table,
+                child_columns=list(r.child_columns), parent_schema=r.parent_schema,
+                parent_table=r.parent_table, parent_columns=list(r.parent_columns),
+                cardinality=r.cardinality, on_delete=r.on_delete, on_update=r.on_update,
+            )
+            for r in graph.relationships
+            if visible(r.child_schema, r.child_table) and visible(r.parent_schema, r.parent_table)
+        ],
+        junctions=[
+            JunctionOut(schema_name=j.schema, table=j.table, parents=[list(p) for p in j.parents])
+            for j in graph.junctions
+            if visible(j.schema, j.table) and all(visible(s, t) for s, t in j.parents)
+        ],
+    )
 
 
 _OBJECT_TYPES = {"table", "view", "procedure", "function", "trigger", "index"}

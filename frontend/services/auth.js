@@ -61,8 +61,12 @@ export class AuthService {
   }
 
   // Used by HttpClient on a 401. Returns true on success.
+  // The refresh token is discarded only when the server REJECTS it (400/401/403). A network
+  // error or 5xx (backend restarting, brief outage) keeps it, so users aren't logged out by a
+  // blip; `lastRefreshTransient` tells the caller it is worth retrying.
   async refresh() {
     const refreshToken = this.getRefreshToken();
+    this.lastRefreshTransient = false;
     if (!refreshToken) return false;
     try {
       const tokens = await this.http.post(
@@ -72,16 +76,26 @@ export class AuthService {
       );
       this._setTokens(tokens.access_token, tokens.refresh_token);
       return true;
-    } catch {
-      this.clear();
+    } catch (err) {
+      const status = err?.status;
+      if (status === 400 || status === 401 || status === 403) {
+        this.clear();
+      } else {
+        this.lastRefreshTransient = true; // network error / 5xx: keep the token
+      }
       return false;
     }
   }
 
-  // Re-establish a session on app load using a persisted refresh token.
-  async restore() {
+  // Re-establish a session on app load using a persisted refresh token. Transient failures
+  // (the API is still starting / briefly unreachable) are retried with a short backoff.
+  async restore({ attempts = 4, delayMs = 750 } = {}) {
     if (!this.getRefreshToken()) return false;
-    const ok = await this.refresh();
+    let ok = await this.refresh();
+    for (let i = 1; !ok && this.lastRefreshTransient && i < attempts; i++) {
+      await new Promise((r) => setTimeout(r, delayMs * i));
+      ok = await this.refresh();
+    }
     if (ok) {
       try {
         await this.loadProfile();

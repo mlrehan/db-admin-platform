@@ -43,6 +43,9 @@ class ScriptRequest(BaseModel):
     sql: str = Field(min_length=1)
     params: dict[str, Any] | None = None
     max_rows: int | None = Field(default=None, ge=1)
+    # Client-generated id so the editor can cancel the run while it's still executing
+    # (POST /queries/{query_id}/cancel). Optional; the server generates one otherwise.
+    query_id: uuid.UUID | None = None
 
 
 class StatementResultOut(BaseModel):
@@ -64,3 +67,10 @@ class StatementResultOut(BaseModel):
 class ScriptResultOut(BaseModel):
     success: bool
     statements: list[StatementResultOut]
+    query_id: uuid.UUID | None = None
+    # The session's database after the run (a script's USE switches it, as in SSMS).
+    active_database: str | None = None
+    database_changed: bool = False
+    # The script left an explicit transaction open on the session (COMMIT/ROLLBACK pending).
+    open_transaction: bool = False
+    execution_ms: float = 0.0

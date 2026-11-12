@@ -4,6 +4,7 @@
 // also the fallback if Monaco fails to load. Exposes getValue()/setValue()/focus().
 
 import { config } from "../core/config.js";
+import { registerSqlCompletion } from "./sql-completion.js";
 
 const MONACO_BASE = config.monacoBase;
 
@@ -81,12 +82,14 @@ export class CodeEditor extends HTMLElement {
   async _tryMonaco() {
     try {
       const monaco = await loadMonaco();
+      registerSqlCompletion(monaco); // schema-aware IntelliSense (once per page)
       const host = document.createElement("div");
       host.className = "monaco-host";
       this.appendChild(host);
       this._textarea.classList.add("hidden");
+      // Keep the latest text (setValue() may have run while Monaco was still loading).
       this._monaco = monaco.editor.create(host, {
-        value: this._value,
+        value: this._textarea.value || this._value,
         language: "sql",
         theme: "vs-dark",
         minimap: { enabled: false },
@@ -96,6 +99,16 @@ export class CodeEditor extends HTMLElement {
         scrollBeyondLastLine: false,
         wordWrap: "on",
         padding: { top: 10 },
+        // IntelliSense: suggestions come from the schema-aware provider, not from words
+        // already in the document; a short delay debounces keystrokes.
+        quickSuggestions: { other: true, comments: false, strings: false },
+        quickSuggestionsDelay: 60,
+        suggestOnTriggerCharacters: true,
+        wordBasedSuggestions: "off",
+        tabCompletion: "on",
+        acceptSuggestionOnEnter: "on",
+        suggestSelection: "first",
+        suggest: { showWords: false, preview: true, filterGraceful: true, localityBonus: true },
       });
       this._monaco.addCommand(
         monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter,

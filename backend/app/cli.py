@@ -42,7 +42,25 @@ async def _bootstrap_engine() -> None:
     db_session.init_engine(settings.control_db)
 
 
+def _validated_email(email: str) -> str | None:
+    """Validate with the SAME rules as the API (so a CLI-created user can always log in and the
+    admin user list never breaks on it). Returns the normalized email, or None if invalid."""
+    from pydantic import TypeAdapter, ValidationError as PydanticValidationError
+    from pydantic import EmailStr
+
+    try:
+        return TypeAdapter(EmailStr).validate_python(email.strip()).lower()
+    except PydanticValidationError as exc:
+        reason = exc.errors()[0].get("msg", "invalid email")
+        print(f"Invalid email '{email}': {reason}", file=sys.stderr)
+        return None
+
+
 async def cmd_create_admin(email: str, password: str | None, full_name: str | None) -> int:
+    normalized = _validated_email(email)
+    if normalized is None:
+        return 2
+    email = normalized
     await _bootstrap_engine()
     pwd = password or _prompt_password()
     async with db_session.session_scope() as session:

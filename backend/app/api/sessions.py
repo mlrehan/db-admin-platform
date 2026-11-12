@@ -24,6 +24,7 @@ from app.auth.dependencies import (
 )
 from app.auth.roles import Permission
 from app.core.exceptions import NotFoundError
+from app.db.session import release_connection
 from app.schemas.session import (
     AdminSessionRead,
     CloseAllSessionsRequest,
@@ -89,6 +90,8 @@ async def open_session(
     ):
         raise NotFoundError("Connection not found.")
     config = service.resolve_config(conn)
+    # Connecting to the target can take seconds: don't hold a control-plane connection meanwhile.
+    await release_connection(service.session)
     session = await orchestrator.open_session(
         user_id=user.id, connection_id=conn.id, config=config
     )

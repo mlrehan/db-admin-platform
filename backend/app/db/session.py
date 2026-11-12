@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -25,12 +25,44 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import Session
 
 from app.core.config import ControlPlaneDBSettings
 from app.core.exceptions import ServiceUnavailableError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+_WROTE = "dbadmin_wrote"  # session.info flag: this transaction has flushed changes
+
+
+@event.listens_for(Session, "after_flush")
+def _mark_written(session: Session, _ctx: object) -> None:
+    session.info[_WROTE] = True
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _clear_written(session: Session, transaction: object) -> None:
+    if getattr(transaction, "parent", None) is None:  # outermost transaction finished
+        session.info.pop(_WROTE, None)
+
+
+async def release_connection(session: AsyncSession) -> None:
+    """End a **read-only** transaction early so its pooled control-plane connection goes back
+    to the pool right away.
+
+    A request's session otherwise holds its connection until the response is sent — i.e. for
+    the whole duration of a slow query on a *target* database — so with many concurrent users
+    the small control-plane pool runs dry while the control DB is idle. Called after the auth /
+    permission reads, before slow work. It never commits on behalf of a request that has
+    written anything (pending or flushed changes): those keep their transaction until the
+    request ends. Objects stay usable afterwards (``expire_on_commit=False``); any later query
+    simply opens a new short transaction."""
+    if not session.in_transaction():
+        return
+    if session.new or session.dirty or session.deleted or session.sync_session.info.get(_WROTE):
+        return
+    await session.commit()
 
 # Module-level singletons, owned by the app lifespan. Accessed only via the helpers below.
 _engine: AsyncEngine | None = None

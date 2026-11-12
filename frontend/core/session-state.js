@@ -9,6 +9,7 @@ export const sessionStore = createStore({
   engine: null,
   label: null,
   database: null, // active database (server-level connections can switch)
+  connectionId: null, // saved connection the session belongs to (stable across sessions)
 });
 
 export function setActiveSession(session) {
@@ -18,6 +19,7 @@ export function setActiveSession(session) {
     engine: session?.engine ?? null,
     label: session ? `${session.engine} · ${session.id.slice(0, 8)}` : null,
     database: session?.active_database ?? null,
+    connectionId: session?.connection_id ?? null,
   });
 }
 

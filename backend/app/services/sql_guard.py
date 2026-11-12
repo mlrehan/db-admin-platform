@@ -130,60 +130,14 @@ def _strip_literals_and_comments(sql: str) -> str:
 
 
 def split_sql_statements(sql: str, engine: EngineType | None = None) -> list[str]:
-    """Split a batch into individual statements on top-level ``;`` preserving original text.
+    """Split a script into individual statements preserving each statement's original text.
 
-    Comment/literal-aware (so semicolons inside strings or comments don't split). ``#`` is a
-    line comment **only in MySQL** — in SQL Server it prefixes temp tables (``#temp``) and in
-    PostgreSQL it isn't a comment, so it must not be stripped there.
-    """
-    hash_comment = engine == EngineType.MYSQL
-    statements: list[str] = []
-    start = 0
-    i, n = 0, len(sql)
+    Delegates to :func:`app.services.sql_batches.split_statements` — the single dialect-aware
+    splitter shared by execution and access analysis (comments/literals per dialect, ``BEGIN …
+    END`` routine bodies kept whole, MySQL ``DELIMITER``)."""
+    from app.services.sql_batches import split_statements as _split  # local: avoid cycle
 
-    def push(end: int) -> None:
-        chunk = sql[start:end].strip()
-        if chunk:
-            statements.append(chunk)
-
-    while i < n:
-        ch = sql[i]
-        two = sql[i : i + 2]
-        if two == "--" or (ch == "#" and hash_comment):
-            j = sql.find("\n", i)
-            i = n if j == -1 else j
-            continue
-        if two == "/*":
-            j = sql.find("*/", i + 2)
-            i = n if j == -1 else j + 2
-            continue
-        if ch in ("'", '"', "`"):
-            quote = ch
-            i += 1
-            while i < n:
-                if sql[i] == quote:
-                    if quote == "'" and i + 1 < n and sql[i + 1] == "'":
-                        i += 2
-                        continue
-                    i += 1
-                    break
-                i += 1
-            continue
-        if ch == "$":
-            m = re.match(r"\$[A-Za-z0-9_]*\$", sql[i:])
-            if m:
-                tag = m.group(0)
-                j = sql.find(tag, i + len(tag))
-                i = n if j == -1 else j + len(tag)
-                continue
-        if ch == ";":
-            push(i)
-            start = i + 1
-            i += 1
-            continue
-        i += 1
-    push(n)
-    return statements
+    return _split(sql, engine)
 
 
 def split_statements(sql: str) -> list[str]:
@@ -229,7 +183,11 @@ class SqlGuard:
     def analyze(self, sql: str) -> SqlAnalysis:
         if not sql or not sql.strip():
             raise ValidationError("SQL statement is empty.")
-        cleaned_statements = split_statements(sql)
+        # GO is a client batch separator: classify the statements on each side of it, so a
+        # destructive statement after a GO line is never folded into the previous one.
+        from app.services.sql_batches import strip_go_lines  # local: avoid cycle
+
+        cleaned_statements = split_statements(strip_go_lines(sql))
         if not cleaned_statements:
             raise ValidationError("No executable SQL statement found.")
 

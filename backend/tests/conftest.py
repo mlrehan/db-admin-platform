@@ -141,6 +141,19 @@ def fake_pg() -> Iterator[None]:
     registry._registry.pop(EngineType.POSTGRESQL, None)  # noqa: SLF001
 
 
+@pytest.fixture(autouse=True)
+def _isolate_metadata_cache() -> Iterator[None]:
+    """The metadata cache is process-wide; give every test a clean one."""
+    from app.services.access_control import invalidate_grant_cache
+    from app.services.metadata_cache import metadata_cache
+
+    metadata_cache.clear()
+    invalidate_grant_cache()
+    yield
+    metadata_cache.clear()
+    invalidate_grant_cache()
+
+
 @pytest.fixture(scope="session")
 def event_loop() -> Iterator[asyncio.AbstractEventLoop]:
     loop = asyncio.new_event_loop()

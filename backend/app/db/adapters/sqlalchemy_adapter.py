@@ -15,6 +15,7 @@ schema introspection are layered on top in Phases 5 and 6.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from collections.abc import AsyncIterator, Mapping
@@ -39,8 +40,15 @@ from app.db.adapters.base import (
     ScriptRun,
 )
 from app.db.adapters.metadata import (
+    Catalog,
+    CatalogColumn,
+    CatalogObject,
+    CatalogRoutine,
     ColumnInfo,
     DatabaseInfo,
+    JunctionTable,
+    Relationship,
+    RelationshipGraph,
     ForeignKeyInfo,
     IndexInfo,
     RoutineInfo,
@@ -79,6 +87,76 @@ def _requires_autocommit(statement: str) -> bool:
     return bool(_AUTOCOMMIT_RE.match(statement or ""))
 
 
+def build_relationship_graph(
+    fks: dict[tuple, list],
+    pks: dict[tuple, Any],
+    uniques: dict[tuple, list[tuple[str, ...]]],
+    default_schema: str | None,
+) -> RelationshipGraph:
+    """Derive relationships + cardinalities + junction tables from reflected keys (pure)."""
+
+    def norm(cols) -> frozenset[str]:
+        return frozenset(c.lower() for c in cols)
+
+    rels: list[Relationship] = []
+    for (schema, table), items in fks.items():
+        pk_cols = norm((pks.get((schema, table)) or {}).get("constrained_columns") or ())
+        unique_sets = [norm(u) for u in uniques.get((schema, table), []) if u]
+        for fk in items:
+            cols = tuple(fk.get("constrained_columns") or ())
+            if not cols or not fk.get("referred_table"):
+                continue
+            key = norm(cols)
+            one_to_one = (pk_cols and key == pk_cols) or key in unique_sets
+            opts = fk.get("options") or {}
+            rels.append(
+                Relationship(
+                    name=fk.get("name"),
+                    child_schema=schema,
+                    child_table=table,
+                    child_columns=cols,
+                    parent_schema=fk.get("referred_schema") or schema or default_schema,
+                    parent_table=fk["referred_table"],
+                    parent_columns=tuple(fk.get("referred_columns") or ()),
+                    cardinality="one-to-one" if one_to_one else "one-to-many",
+                    on_delete=opts.get("ondelete"),
+                    on_update=opts.get("onupdate"),
+                )
+            )
+    junctions: list[JunctionTable] = []
+    by_child: dict[tuple, list[Relationship]] = {}
+    for r in rels:
+        by_child.setdefault((r.child_schema, r.child_table), []).append(r)
+    for key, items in by_child.items():
+        pk_cols = norm((pks.get(key) or {}).get("constrained_columns") or ())
+        if len(pk_cols) < 2:
+            continue
+        fk_cols = frozenset().union(*(norm(r.child_columns) for r in items))
+        parents = tuple(dict.fromkeys((r.parent_schema, r.parent_table) for r in items))
+        if pk_cols <= fk_cols and len(parents) >= 2:
+            junctions.append(JunctionTable(schema=key[0], table=key[1], parents=parents))
+    return RelationshipGraph(relationships=tuple(rels), junctions=tuple(junctions))
+
+
+def _format_odbc_error(text: str) -> str:
+    """Turn a pyodbc diagnostic string into an SSMS-style message.
+
+    ``[42000] [Microsoft][ODBC Driver 17 for SQL Server][SQL Server]Must declare the scalar
+    variable "@x". (137) (SQLExecDirectW)`` → ``Msg 137: Must declare the scalar variable "@x".``
+    Multiple diagnostic records (pyodbc joins them with "; ") are each cleaned."""
+    parts = []
+    for record in re.split(r";\s*(?=\[[0-9A-Z]{5}\])", text):
+        native = re.search(r"\((\d+)\)\s*(?:\(SQL\w+\))?\s*$", record)
+        body = re.sub(r"\s*\(\d+\)\s*(?:\(SQL\w+\))?\s*$", "", record)
+        body = re.sub(r"^\s*\[[0-9A-Z]{5}\]\s*", "", body)
+        body = re.sub(r"^(\[[^\]]*\])+", "", body).strip()
+        if not body:
+            continue
+        code = native.group(1) if native else None
+        parts.append(f"Msg {code}: {body}" if code and code != "0" else body)
+    return "\n".join(parts) or text
+
+
 class SQLAlchemyAdapter(DatabaseAdapter):
     # Subclasses must set these.
     dialect: ClassVar[str]
@@ -114,6 +192,15 @@ class SQLAlchemyAdapter(DatabaseAdapter):
         self._engines: dict[str | None, AsyncEngine] = {}
         self._active_db: str | None = None
         self._connected = False
+        # The session's dedicated script connection (SSMS "query window" semantics): every
+        # Run of the editor uses this ONE connection, so temp tables, SET options, the USE'd
+        # database and explicit transactions persist across Runs. It is never returned to the
+        # pool (it may hold session state); it's invalidated when released.
+        self._script_conn: AsyncConnection | None = None
+        # The driver cursor currently executing a batch (SQL Server), for ODBC-level cancel.
+        self._active_cursor: Any = None
+        # Set by cancel_running(): the current script stops before its next statement/batch.
+        self._cancel_requested = False
 
     @property
     def is_connected(self) -> bool:
@@ -193,6 +280,9 @@ class SQLAlchemyAdapter(DatabaseAdapter):
         self._connected = True
 
     async def close(self) -> None:
+        # Closing the session discards its script connection; the server rolls back any
+        # transaction the user left open (same as closing an SSMS query window).
+        await self._release_script_connection()
         engines = list(self._engines.values())
         self._engines.clear()
         self._connected = False
@@ -234,6 +324,7 @@ class SQLAlchemyAdapter(DatabaseAdapter):
                 details={**self._config.redacted(), "database": target},
             ) from exc
         self._active_db = target
+        await self._retarget_script_connection(target)
 
     async def list_databases(self) -> list[DatabaseInfo]:
         if not self._connected:
@@ -502,91 +593,367 @@ class SQLAlchemyAdapter(DatabaseAdapter):
     #   • "batch" (SQL Server): send the WHOLE script in one driver call and walk nextset() —
     #     required because T-SQL variables / table variables / cursors are *batch*-scoped.
     script_mode: ClassVar[str] = "sequential"
+    # Query returning the connection's current database (engines with a USE statement).
+    current_database_sql: ClassVar[str | None] = None
+    # Whether the engine can switch databases on an existing connection with USE.
+    supports_use_statement: ClassVar[bool] = False
+
+    # --- the session's pinned script connection ------------------------------------------
+
+    async def _script_connection(self) -> AsyncConnection:
+        """Return the session's dedicated script connection, opening it on first use (or
+        after it was invalidated). Runs in AUTOCOMMIT at the driver level, so explicit
+        ``BEGIN``/``COMMIT``/``ROLLBACK`` issued by the user are honoured verbatim."""
+        if not self._connected:
+            await self.connect()
+        conn = self._script_conn
+        if conn is not None and (conn.closed or conn.invalidated):
+            conn = None
+        if conn is None:
+            conn = await self._engine_for(self._active_db).connect()
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            self._script_conn = conn
+        return conn
+
+    async def _release_script_connection(self) -> None:
+        """Discard the script connection. It is invalidated rather than returned to the pool,
+        because it may carry session state (USE'd database, temp tables, open transaction)."""
+        conn, self._script_conn = self._script_conn, None
+        if conn is None:
+            return
+        try:
+            await conn.invalidate()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+        try:
+            await conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _retarget_script_connection(self, target: str | None) -> None:
+        """Point the script connection at a newly selected database: ``USE`` on engines that
+        support it (keeps temp tables / session state, like SSMS), otherwise reconnect."""
+        conn = self._script_conn
+        if conn is None or conn.closed or conn.invalidated:
+            return
+        if self.supports_use_statement and target:
+            try:
+                await conn.exec_driver_sql(f"USE {self._quote_ident(target)}")
+                return
+            except Exception:  # noqa: BLE001 - fall back to a fresh connection
+                pass
+        await self._release_script_connection()
+
+    # SQL that cancels the statement running on another backend, given its server id ({id}).
+    cancel_backend_sql: ClassVar[str | None] = None
+
+    async def cancel_running(self) -> None:
+        """Best-effort *server-side* cancel of the statement running on the script connection
+        (cancelling the asyncio task alone would leave the database still working):
+        SQL Server → ODBC ``SQLCancel`` on the executing cursor; PostgreSQL / MySQL → cancel
+        the session's backend from a separate pooled connection. Remaining statements/batches
+        of the script are skipped."""
+        self._cancel_requested = True
+        impl = getattr(self._active_cursor, "_impl", None)
+        if impl is not None and callable(getattr(impl, "cancel", None)):
+            try:
+                await asyncio.to_thread(impl.cancel)
+            except Exception:  # noqa: BLE001
+                logger.warning("ODBC cancel failed", exc_info=True)
+            return
+        conn = self._script_conn
+        if conn is None or not self.cancel_backend_sql or conn.closed:
+            return
+        try:
+            raw = await conn.get_raw_connection()
+            driver = raw.driver_connection
+            backend_id = None
+            for attr in ("get_server_pid", "thread_id"):  # asyncpg / aiomysql
+                getter = getattr(driver, attr, None)
+                if callable(getter):
+                    backend_id = getter()
+                    break
+            if backend_id is None:
+                return
+            async with self._engine_for(self._active_db).connect() as side:
+                side = await side.execution_options(isolation_level="AUTOCOMMIT")
+                await side.exec_driver_sql(self.cancel_backend_sql.format(id=int(backend_id)))
+        except Exception:  # noqa: BLE001 - the connection is released by the caller anyway
+            logger.warning("Backend cancel failed", exc_info=True)
+
+    async def _current_database(self, conn: AsyncConnection) -> str | None:
+        if not self.current_database_sql or conn.closed or conn.invalidated:
+            return None
+        try:
+            value = (await conn.exec_driver_sql(self.current_database_sql)).scalar()
+        except Exception:  # noqa: BLE001
+            return None
+        return str(value) if value else None
+
+    # SQL returning a positive number while a transaction is open (engines whose driver
+    # doesn't expose the state natively — SQL Server: @@TRANCOUNT).
+    transaction_probe_sql: ClassVar[str | None] = None
+
+    async def _in_transaction(self, conn: AsyncConnection) -> bool:
+        """Whether the script connection is inside an explicit, still-open transaction."""
+        if conn.closed or conn.invalidated:
+            return False
+        try:
+            raw = await conn.get_raw_connection()
+            driver = raw.driver_connection
+            for attr in ("is_in_transaction", "get_transaction_status"):  # asyncpg / aiomysql
+                probe = getattr(driver, attr, None)
+                if callable(probe):
+                    return bool(probe())
+            flag = getattr(driver, "in_transaction", None)  # aiosqlite / sqlite3
+            if isinstance(flag, bool):
+                return flag
+            if self.transaction_probe_sql:
+                return bool((await conn.exec_driver_sql(self.transaction_probe_sql)).scalar())
+        except Exception:  # noqa: BLE001
+            return False
+        return False
+
+    # --- whole-script execution --------------------------------------------------------
 
     async def run_script(self, sql: str, *, max_rows: int = 1000) -> ScriptRun:
         start = time.perf_counter()
-        if self.script_mode == "batch":
-            result_sets, messages, error = await self._run_script_batch(sql, max_rows)
-        else:
-            result_sets, messages, error = await self._run_script_sequential(sql, max_rows)
+        result_sets: list[ScriptResultSet] = []
+        messages: list[str] = []
+        errors: list[str] = []
+        self._cancel_requested = False
+        conn = await self._script_connection()
+        try:
+            if self.script_mode == "batch":
+                await self._run_script_batch(conn, sql, max_rows, result_sets, messages, errors)
+            else:
+                await self._run_script_sequential(conn, sql, max_rows, result_sets, messages, errors)
+        finally:
+            # A connection that broke (network/server restart) must not be reused.
+            if conn.closed or conn.invalidated:
+                await self._release_script_connection()
+
+        # Follow a USE in the script: the session now targets that database (as SSMS updates
+        # its database selector), so the explorer / data viewer / next run agree with it.
+        changed_to: str | None = None
+        current = await self._current_database(conn)
+        if current and current.lower() != str(self._resolve_db(self._active_db) or "").lower():
+            try:
+                await self.use_database(current)
+                changed_to = current
+            except Exception:  # noqa: BLE001 - keep the previous selection if it's unusable
+                changed_to = None
+        open_tx = await self._in_transaction(conn) if self._script_conn is conn else False
+        if open_tx:
+            messages.append(
+                "Warning: a transaction is still open on this session. "
+                "Run COMMIT or ROLLBACK to end it."
+            )
         elapsed = (time.perf_counter() - start) * 1000
         return ScriptRun(
-            result_sets=result_sets, messages=messages, execution_ms=round(elapsed, 3), error=error
+            result_sets=result_sets,
+            messages=messages,
+            execution_ms=round(elapsed, 3),
+            error=errors[0] if errors else None,
+            errors=errors,
+            database_changed_to=changed_to,
+            open_transaction=open_tx,
         )
 
     @staticmethod
     def _script_error(exc: Exception) -> str:
         # Prefer the driver's own message (SQLAlchemy wraps it in .orig).
-        message = str(getattr(exc, "orig", None) or exc).strip()
+        orig = getattr(exc, "orig", None) or exc
+        args = getattr(orig, "args", ())
+        if (
+            len(args) >= 2 and isinstance(args[0], str) and isinstance(args[1], str)
+            and re.fullmatch(r"[0-9A-Z]{5}", args[0])
+        ):
+            return _format_odbc_error(args[1])
+        if len(args) >= 2 and isinstance(args[0], int) and isinstance(args[1], str):
+            return f"Error {args[0]}: {args[1]}"  # PyMySQL / aiomysql: (errno, message)
+        # asyncpg & co. prepend "<class 'asyncpg.exceptions.X'>: ".
+        message = re.sub(r"^<class '[^']+'>:\s*", "", str(orig).strip())
         return message or exc.__class__.__name__
 
+    _DML_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"^\s*(?:with\b[\s\S]*?\b)?(insert|update|delete|merge|replace|upsert)\b", re.IGNORECASE
+    )
+
+    def _collect_result(
+        self,
+        result: Any,
+        max_rows: int,
+        result_sets: list[ScriptResultSet],
+        messages: list[str],
+        statement: str = "",
+    ) -> None:
+        if result.returns_rows:
+            fetched = result.fetchmany(max_rows + 1)
+            truncated = len(fetched) > max_rows
+            rows = [tuple(r) for r in fetched[:max_rows]]
+            columns = [QueryColumn(name=str(k)) for k in result.keys()]
+            result_sets.append(ScriptResultSet(columns, rows, truncated))
+        else:
+            affected = self._rows_affected(result.rowcount)
+            # Like SSMS: report row counts for data changes; DDL/USE/SET "0 rows" is noise.
+            if affected is not None and (affected > 0 or self._DML_RE.match(statement or "")):
+                messages.append(f"{affected} row(s) affected")
+
     async def _run_script_sequential(
-        self, sql: str, max_rows: int
-    ) -> tuple[list[ScriptResultSet], list[str], str | None]:
+        self,
+        conn: AsyncConnection,
+        sql: str,
+        max_rows: int,
+        result_sets: list[ScriptResultSet],
+        messages: list[str],
+        errors: list[str],
+    ) -> None:
+        """Run each statement in order on the session's script connection (PostgreSQL, MySQL,
+        SQLite — temp tables and session variables are connection-scoped). Stops at the first
+        error, like pgAdmin / MySQL Workbench; result sets produced before it are kept."""
         from app.services.sql_guard import split_sql_statements  # local: avoid layering cycle
 
-        result_sets: list[ScriptResultSet] = []
-        messages: list[str] = []
-        error: str | None = None
-        async with self.acquire() as conn:
-            # AUTOCOMMIT so each statement commits on the shared connection (temp tables created
-            # this way persist for the connection's lifetime, just like a real session).
-            run = await conn.execution_options(isolation_level="AUTOCOMMIT")
-            for stmt in split_sql_statements(sql, self.engine):
-                try:
-                    result = await run.exec_driver_sql(stmt)
-                except Exception as exc:  # noqa: BLE001 - report + keep prior result sets (SSMS-like)
-                    error = self._script_error(exc)
-                    break
-                if result.returns_rows:
-                    fetched = result.fetchmany(max_rows + 1)
-                    truncated = len(fetched) > max_rows
-                    rows = [tuple(r) for r in fetched[:max_rows]]
-                    columns = [QueryColumn(name=str(k)) for k in result.keys()]
-                    result_sets.append(ScriptResultSet(columns, rows, truncated))
-                else:
-                    affected = self._rows_affected(result.rowcount)
-                    if affected is not None:
-                        messages.append(f"{affected} row(s) affected")
-        return result_sets, messages, error
+        statements = split_sql_statements(sql, self.engine)
+        for idx, stmt in enumerate(statements, start=1):
+            if self._cancel_requested:
+                errors.append("Query was cancelled by the user.")
+                return
+            try:
+                result = await conn.exec_driver_sql(stmt)
+            except Exception as exc:  # noqa: BLE001 - report + keep prior result sets
+                label = f"Statement {idx}: " if len(statements) > 1 else ""
+                message = self._script_error(exc)
+                if self._cancel_requested:
+                    message = f"Query was cancelled by the user. ({message})"
+                errors.append(f"{label}{message}")
+                return
+            self._collect_result(result, max_rows, result_sets, messages, stmt)
+        if statements and not errors and not result_sets and not messages:
+            messages.append("Commands completed successfully.")
 
     async def _run_script_batch(
-        self, sql: str, max_rows: int
-    ) -> tuple[list[ScriptResultSet], list[str], str | None]:
-        """Send the whole script as one batch and collect every result set via the driver's
-        native ``nextset()`` (SQL Server / MySQL async DBAPI cursors support this). On a
-        mid-batch error the result sets already produced are returned along with the error, so
-        the editor shows the results plus the failure — just like SSMS."""
-        result_sets: list[ScriptResultSet] = []
-        messages: list[str] = []
-        error: str | None = None
-        async with self.acquire() as conn:
-            autoconn = await conn.execution_options(isolation_level="AUTOCOMMIT")
-            raw = await autoconn.get_raw_connection()
-            cursor = await raw.driver_connection.cursor()
-            try:
-                await cursor.execute(sql)
-                while True:
-                    if cursor.description:
-                        columns = [QueryColumn(name=str(d[0])) for d in cursor.description]
-                        fetched = await cursor.fetchmany(max_rows + 1)
-                        truncated = len(fetched) > max_rows
-                        rows = [tuple(r) for r in fetched[:max_rows]]
-                        result_sets.append(ScriptResultSet(columns, rows, truncated))
-                    else:
-                        affected = self._rows_affected(getattr(cursor, "rowcount", -1))
-                        if affected is not None:
-                            messages.append(f"{affected} row(s) affected")
-                    if not await cursor.nextset():
-                        break
-            except Exception as exc:  # noqa: BLE001 - keep the result sets gathered before the error
-                error = self._script_error(exc)
-            finally:
+        self,
+        conn: AsyncConnection,
+        sql: str,
+        max_rows: int,
+        result_sets: list[ScriptResultSet],
+        messages: list[str],
+        errors: list[str],
+    ) -> None:
+        """SQL Server: split the script into batches on ``GO`` (a *client* separator that must
+        never reach the server), then send each batch — repeated ``n`` times for ``GO n`` — in
+        order on the session's script connection, walking every result set with ``nextset()``.
+
+        Mirrors SSMS: a failing batch is reported against its batch number and script line,
+        and execution continues with the next batch. ``PRINT``/informational output is
+        captured into the Messages list."""
+        from app.services.sql_batches import BatchParseError, split_go_batches
+
+        try:
+            batches = split_go_batches(sql)
+        except BatchParseError as exc:
+            errors.append(str(exc))
+            return
+        multi = len(batches) > 1 or any(b.repeat > 1 for b in batches)
+        raw = await conn.get_raw_connection()
+        driver_conn = raw.driver_connection
+        for batch in batches:
+            label = f"Batch {batch.index} (line {batch.start_line})" if multi else ""
+            for _ in range(batch.repeat):
+                # A cancel can arrive before any batch is running (e.g. while the session's
+                # connection is still being opened) — never start new work after it.
+                if self._cancel_requested:
+                    break
+                failed = await self._exec_one_batch(
+                    driver_conn, batch.sql, max_rows, result_sets, messages, errors, label
+                )
+                if failed or self._cancel_requested:
+                    break  # stop repeating a failing batch; continue with the next batch
+            if self._cancel_requested:
+                # Unlike an ordinary error (SSMS continues with the next batch), a cancel stops
+                # the whole script; results produced so far are kept.
+                errors.append("Query was cancelled by the user.")
+                break
+            if conn.invalidated or conn.closed:
+                break
+        if multi and not errors:
+            messages.append(f"{len(batches)} batch(es) completed successfully.")
+        elif not errors and not result_sets and not messages:
+            messages.append("Commands completed successfully.")
+
+    async def _exec_one_batch(
+        self,
+        driver_conn: Any,
+        batch_sql: str,
+        max_rows: int,
+        result_sets: list[ScriptResultSet],
+        messages: list[str],
+        errors: list[str],
+        label: str,
+    ) -> bool:
+        """Execute one batch on the raw driver connection. Returns True if it failed."""
+        cursor = await driver_conn.cursor()
+        self._active_cursor = cursor
+        try:
+            await cursor.execute(batch_sql)
+            while True:
+                self._drain_driver_messages(cursor, messages)
+                if cursor.description:
+                    columns = [QueryColumn(name=str(d[0])) for d in cursor.description]
+                    fetched = await cursor.fetchmany(max_rows + 1)
+                    truncated = len(fetched) > max_rows
+                    rows = [tuple(r) for r in fetched[:max_rows]]
+                    result_sets.append(ScriptResultSet(columns, rows, truncated))
+                else:
+                    affected = self._rows_affected(getattr(cursor, "rowcount", -1))
+                    if affected is not None:
+                        messages.append(f"{affected} row(s) affected")
+                if not await cursor.nextset():
+                    break
+            self._drain_driver_messages(cursor, messages)
+            return False
+        except asyncio.CancelledError:
+            # Task cancelled (timeout or hard stop): the statement is still running in the ODBC
+            # worker thread — cancel it at the server NOW, while we still hold the cursor.
+            impl = getattr(cursor, "_impl", None)
+            if impl is not None and callable(getattr(impl, "cancel", None)):
                 try:
-                    await cursor.close()
+                    await asyncio.shield(asyncio.to_thread(impl.cancel))
                 except Exception:  # noqa: BLE001
                     pass
-        return result_sets, messages, error
+            raise
+        except Exception as exc:  # noqa: BLE001 - keep the result sets gathered before the error
+            self._drain_driver_messages(cursor, messages)
+            if self._cancel_requested:
+                return True  # reported once by the caller as "cancelled by the user"
+            message = self._script_error(exc)
+            errors.append(f"{label}: {message}" if label else message)
+            return True
+        finally:
+            self._active_cursor = None
+            try:
+                await cursor.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _drain_driver_messages(cursor: Any, messages: list[str]) -> None:
+        """Move server informational messages (T-SQL ``PRINT``, low-severity ``RAISERROR``)
+        exposed by pyodbc as ``cursor.messages`` into the Messages list, minus ODBC prefixes."""
+        impl = getattr(cursor, "_impl", cursor)
+        pending = getattr(impl, "messages", None)
+        if not pending:
+            return
+        for item in list(pending):
+            text_ = item[1] if isinstance(item, (tuple, list)) and len(item) > 1 else item
+            text_ = re.sub(r"^(\[[^\]]*\])+", "", str(text_)).strip()
+            if text_:
+                messages.append(text_)
+        try:
+            pending.clear()
+        except Exception:  # noqa: BLE001 - read-only on some driver versions
+            pass
 
     async def stream(
         self,
@@ -625,6 +992,138 @@ class SQLAlchemyAdapter(DatabaseAdapter):
     # reflection across PostgreSQL, MySQL and MSSQL (run via run_sync over the async
     # connection). Stored routines aren't covered by the Inspector, so they're read from the
     # standard ``information_schema.routines`` view (supported by all three engines).
+
+    # --- bulk catalog (IntelliSense) --------------------------------------------------------
+    #
+    # ONE query returns every column of every user table/view in the active database:
+    # (schema, table, table_type, column, data_type, char_len, precision, scale, is_nullable).
+    # The generic version uses INFORMATION_SCHEMA; engines override with faster native catalogs.
+    catalog_columns_sql: ClassVar[str] = (
+        "SELECT c.TABLE_SCHEMA, c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.DATA_TYPE, "
+        "c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.IS_NULLABLE "
+        "FROM INFORMATION_SCHEMA.COLUMNS c "
+        "JOIN INFORMATION_SCHEMA.TABLES t "
+        "ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME "
+        "ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION"
+    )
+    # (schema, routine name, 'PROCEDURE' | 'FUNCTION'); None when the engine has none.
+    catalog_routines_sql: ClassVar[str | None] = (
+        "SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES "
+        "ORDER BY ROUTINE_SCHEMA, ROUTINE_NAME"
+    )
+    # Safety cap for enormous databases (the editor still works; the result is flagged).
+    catalog_max_columns: ClassVar[int] = 150_000
+
+    @staticmethod
+    def _type_label(data_type: Any, char_len: Any, precision: Any, scale: Any) -> str:
+        label = str(data_type or "").strip()
+        if "(" in label:  # already fully formatted (MySQL column_type, PG format_type)
+            return label
+        if char_len is not None:
+            try:
+                n = int(char_len)
+            except (TypeError, ValueError):
+                n = None
+            if n is not None and n != 0:
+                return f"{label}({'max' if n < 0 else n})"
+        if precision is not None and label.lower() in ("decimal", "numeric"):
+            return f"{label}({precision},{scale or 0})"
+        return label
+
+    async def get_catalog(self) -> Catalog:
+        """Every table/view (with its columns) and routine in the active database, in a
+        single round trip per kind — the source for SQL IntelliSense."""
+        async with self.acquire() as conn:
+            default_schema = await self._default_schema(conn)
+            result = await conn.execute(text(self.catalog_columns_sql))
+            rows = result.fetchmany(self.catalog_max_columns + 1)
+            routine_rows = (
+                (await conn.execute(text(self.catalog_routines_sql))).fetchall()
+                if self.catalog_routines_sql
+                else []
+            )
+        truncated = len(rows) > self.catalog_max_columns
+        objects: list[CatalogObject] = []
+        current_key: tuple[Any, Any] | None = None
+        columns: list[CatalogColumn] = []
+        kind = "table"
+
+        def flush() -> None:
+            if current_key is not None:
+                objects.append(
+                    CatalogObject(schema=current_key[0], name=current_key[1], kind=kind,
+                                  columns=tuple(columns))
+                )
+
+        for r in rows[: self.catalog_max_columns]:
+            key = (r[0], r[1])
+            if key != current_key:
+                flush()
+                current_key = key
+                columns = []
+                kind = "view" if "VIEW" in str(r[2] or "").upper() else "table"
+            columns.append(
+                CatalogColumn(
+                    name=str(r[3]),
+                    data_type=self._type_label(r[4], r[5], r[6], r[7]),
+                    nullable=str(r[8]).upper() != "NO",
+                )
+            )
+        flush()
+        routines = tuple(
+            CatalogRoutine(
+                schema=(str(r[0]) if r[0] is not None else None),
+                name=str(r[1]),
+                kind="procedure" if "PROC" in str(r[2] or "").upper() else "function",
+            )
+            for r in routine_rows
+        )
+        return Catalog(default_schema=default_schema, objects=tuple(objects),
+                       routines=routines, truncated=truncated)
+
+    # --- relationship graph (database diagram) ----------------------------------------------
+
+    max_relationship_schemas: ClassVar[int] = 50
+
+    async def get_relationships(self) -> RelationshipGraph:
+        """Every foreign key in the active database (all user schemas) with its cardinality,
+        plus detected many-to-many junction tables — using SQLAlchemy's batched ``get_multi_*``
+        reflection (a handful of queries per schema, not one per table)."""
+
+        def _reflect(sync_conn: SyncConnection) -> dict[str, Any]:
+            insp = inspect(sync_conn)
+            default = insp.default_schema_name
+            schemas = [s for s in insp.get_schema_names() if not self.is_system_schema(s)]
+            schemas = schemas[: self.max_relationship_schemas] or [default]
+            fks: dict[tuple, list] = {}
+            pks: dict[tuple, Any] = {}
+            uniques: dict[tuple, list[tuple[str, ...]]] = {}
+            for schema in schemas:
+                # Keys come back as (schema, table) where schema is None for the default one.
+                for key, items in insp.get_multi_foreign_keys(schema=schema).items():
+                    fks[(key[0] or default, key[1])] = items
+                for key, pk in insp.get_multi_pk_constraint(schema=schema).items():
+                    pks[(key[0] or default, key[1])] = pk
+                try:
+                    multi_uc = insp.get_multi_unique_constraints(schema=schema)
+                except NotImplementedError:
+                    # SQL Server's dialect doesn't reflect UNIQUE constraints separately; they
+                    # are always backed by unique indexes, which are collected just below.
+                    multi_uc = {}
+                for key, ucs in multi_uc.items():
+                    uniques.setdefault((key[0] or default, key[1]), []).extend(
+                        tuple(u.get("column_names") or ()) for u in ucs
+                    )
+                for key, idxs in insp.get_multi_indexes(schema=schema).items():
+                    uniques.setdefault((key[0] or default, key[1]), []).extend(
+                        tuple(c for c in (i.get("column_names") or ()) if c)
+                        for i in idxs if i.get("unique")
+                    )
+            return {"default": default, "fks": fks, "pks": pks, "uniques": uniques}
+
+        async with self.acquire() as conn:
+            data = await conn.run_sync(_reflect)
+        return build_relationship_graph(data["fks"], data["pks"], data["uniques"], data["default"])
 
     # Override per engine if the version query / routine source must differ.
     routines_sql: ClassVar[str] = (

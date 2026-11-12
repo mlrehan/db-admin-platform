@@ -230,6 +230,33 @@ class FakeAdapter(DatabaseAdapter):
             SchemaInfo(name="pg_catalog"),
         ]
 
+    async def get_catalog(self):
+        """Bulk IntelliSense catalog built from the canned schema (mirrors real adapters)."""
+        from app.db.adapters.metadata import (
+            Catalog,
+            CatalogColumn,
+            CatalogObject,
+            CatalogRoutine,
+        )
+
+        self.catalog_calls = getattr(self, "catalog_calls", 0) + 1
+        objects = []
+        for t in await self.list_tables("public"):
+            detail = await self.describe_table(t.name, "public")
+            objects.append(
+                CatalogObject(
+                    schema="public", name=t.name, kind=t.kind,
+                    columns=tuple(
+                        CatalogColumn(c.name, c.data_type, c.nullable) for c in detail.columns
+                    ),
+                )
+            )
+        routines = tuple(
+            CatalogRoutine(schema="public", name=r.name, kind=r.kind)
+            for r in await self.list_routines("public")
+        )
+        return Catalog(default_schema="public", objects=tuple(objects), routines=routines)
+
     async def list_tables(self, schema: str | None = None) -> list[TableInfo]:
         target = schema or "public"
         return [

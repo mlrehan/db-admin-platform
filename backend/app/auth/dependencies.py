@@ -22,7 +22,7 @@ from app.auth.tokens import TokenType, decode_token
 from app.core.config import Settings, get_settings
 from app.core.context import user_id_ctx
 from app.core.exceptions import AuthenticationError, AuthorizationError
-from app.db.session import get_session
+from app.db.session import get_session, release_connection
 from app.models.user import User
 from app.services.user_service import UserService
 
@@ -30,7 +30,7 @@ from app.services.user_service import UserService
 _bearer = HTTPBearer(auto_error=False)
 
 
-def get_user_service(
+async def get_user_service(  # async: no thread hop (see app/api/deps.py)
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> UserService:
     return UserService(session)
@@ -61,6 +61,10 @@ async def get_current_user(
         raise AuthenticationError("User no longer exists or is inactive.")
     if user.token_version != claims.token_version:
         raise AuthenticationError("Token has been revoked.", code="TOKEN_REVOKED")
+
+    # The user lookup was read-only: hand the control-plane connection back to the pool now
+    # instead of holding it for the rest of the request (e.g. a long target-DB query).
+    await release_connection(service.session)
 
     # Bind identity for logging/audit correlation for the remainder of the request.
     user_id_ctx.set(str(user.id))

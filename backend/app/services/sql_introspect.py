@@ -46,6 +46,7 @@ _DIALECT = {
     EngineType.POSTGRESQL: "postgres",
     EngineType.MYSQL: "mysql",
     EngineType.MSSQL: "tsql",
+    EngineType.SQLITE: "sqlite",
 }
 
 

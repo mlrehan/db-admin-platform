@@ -402,6 +402,30 @@ audit-log {
   font-family: var(--font-mono);
   color: var(--text-secondary);
 }
+/* SSMS-style message text: server output, PRINT lines and errors, selectable and wrapped. */
+.msg-line .msg-text {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+.msg-line.msg-error {
+  align-items: flex-start;
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.msg-line.msg-footer {
+  border-bottom: none;
+  font-size: var(--fs-xs);
+}
+/* Warning chip shown while a transaction is left open on the session. */
+.badge.tx-open {
+  background: rgba(214, 164, 23, 0.18);
+  color: var(--cat-write);
+  font-weight: 600;
+}
 
 /* Query-category badges */
 .badge.cat-read {
@@ -673,15 +697,30 @@ audit-log {
   cursor: grab;
 }
 .erd-stage.panning { cursor: grabbing; }
+.erd-stage { outline: none; }
+.erd-stage.relating { cursor: crosshair; }
 .erd-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
-.erd-links { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
-.erd-link { stroke: var(--accent); stroke-width: 1.5; opacity: 0.8; }
-.erd-one { fill: var(--accent); }
-.erd-many { fill: var(--bg-base); stroke: var(--accent); stroke-width: 1.5; }
-.erd-hint { position: absolute; top: 16px; left: 16px; }
+/* Connectors sit under the boxes; only the paths themselves take pointer events. */
+.erd-links { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; z-index: 0; }
+.erd-edge { pointer-events: visiblePainted; cursor: pointer; }
+.erd-link { fill: none; stroke: var(--accent); stroke-width: 1.6; opacity: 0.85; }
+.erd-link-hit { fill: none; stroke: transparent; stroke-width: 12; }
+.erd-mark { fill: none; stroke: var(--accent); stroke-width: 1.6; }
+.erd-edge.many-to-many .erd-link, .erd-edge.many-to-many .erd-mark { stroke: var(--cat-write); }
+.erd-edge:hover .erd-link, .erd-edge.selected .erd-link { stroke-width: 3; opacity: 1; }
+.erd-edge.selected .erd-link, .erd-edge.selected .erd-mark { stroke: var(--danger); }
+.erd-edge-label { fill: var(--cat-write); font-size: 11px; font-weight: 600; paint-order: stroke; stroke: var(--bg-base); stroke-width: 3px; }
+.erd-relate-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 5 4; }
+.erd-hint { position: absolute; top: 16px; left: 16px; right: 16px; max-width: 520px; line-height: 1.5; }
+.erd-hint.hidden { display: none; }
+.erd-status { position: absolute; bottom: 8px; left: 12px; font-size: var(--fs-xs); pointer-events: none; }
 .erd-box {
   position: absolute;
-  width: 210px;
+  z-index: 1;
+  /* Size to content so names/types aren't truncated, within sensible bounds. */
+  width: max-content;
+  min-width: 190px;
+  max-width: 380px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -689,29 +728,71 @@ audit-log {
   font-size: var(--fs-xs);
   user-select: none;
 }
+.erd-box.junction { border-style: dashed; }
+.erd-box.flash { animation: erd-flash 0.7s ease; }
+@keyframes erd-flash { 0%, 100% { box-shadow: var(--shadow-lg); } 40% { box-shadow: 0 0 0 4px var(--accent-soft), var(--shadow-lg); } }
 .erd-box-head {
-  padding: 6px var(--sp-2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px var(--sp-2);
   font-weight: 700;
   color: var(--accent-contrast);
   background: var(--accent);
   border-radius: var(--radius-md) var(--radius-md) 0 0;
   cursor: move;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-.erd-box-body { max-height: 320px; overflow: auto; }
+.erd-title { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.erd-schema { opacity: 0.75; font-weight: 500; }
+.erd-badge { font-size: 9px; padding: 1px 5px; border-radius: 999px; background: rgba(0, 0, 0, 0.22); }
+.erd-x {
+  flex: none; width: 18px; height: 18px; line-height: 16px; padding: 0;
+  border: none; border-radius: 4px; background: transparent; color: inherit;
+  font-size: 15px; cursor: pointer; opacity: 0.7;
+}
+.erd-x:hover { opacity: 1; background: rgba(0, 0, 0, 0.25); }
+.erd-box-body { max-height: 340px; overflow: auto; }
 .erd-col {
-  display: flex;
-  justify-content: space-between;
+  position: relative;
+  display: grid;
+  grid-template-columns: 30px minmax(60px, 1fr) auto;
+  align-items: center;
   gap: var(--sp-2);
-  padding: 3px var(--sp-2);
+  padding: 3px 14px 3px 6px;
   border-top: 1px solid var(--border);
 }
-.erd-col-name { display: flex; align-items: center; gap: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.erd-col-type { color: var(--text-muted); font-family: var(--font-mono); white-space: nowrap; }
+.erd-col.relate-target { background: var(--accent-soft); outline: 1px solid var(--accent); }
+.erd-col.erd-loading { display: flex; gap: 8px; color: var(--text-muted); }
+.erd-col-icons { display: flex; gap: 2px; align-items: center; }
+.erd-col-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.erd-col-name.notnull { font-weight: 600; }
+.erd-col-type { color: var(--text-muted); font-family: var(--font-mono); white-space: nowrap; text-align: right; }
 .erd-pk { font-size: 10px; }
 .erd-fk { font-size: 9px; font-weight: 700; color: var(--accent); }
+.erd-uq { font-size: 9px; font-weight: 700; color: var(--cat-write); }
+/* The drag handle used to create a relationship (drag onto another column). */
+.erd-port {
+  position: absolute; right: 3px; top: 50%; width: 8px; height: 8px; margin-top: -4px;
+  border-radius: 50%; border: 1.5px solid var(--accent); background: var(--bg-elevated);
+  cursor: crosshair; opacity: 0; transition: opacity 0.12s;
+}
+.erd-box:hover .erd-port, .erd-stage.relating .erd-port { opacity: 1; }
+.erd-port:hover { background: var(--accent); }
+.erd-list-label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.erd-list-toggle {
+  flex: none; width: 22px; height: 20px; padding: 0; border: 1px solid var(--border);
+  border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer;
+  opacity: 0; transition: opacity 0.12s;
+}
+.erd-list-item:hover .erd-list-toggle, .erd-list-item.on .erd-list-toggle { opacity: 1; }
+.erd-list-item.on .erd-list-toggle { color: var(--accent); border-color: var(--accent); }
+.erd-sql {
+  margin: 0; padding: 10px; max-height: 180px; overflow: auto; white-space: pre-wrap;
+  font-family: var(--font-mono); font-size: var(--fs-xs);
+  background: var(--bg-base); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.erd-warn { margin-bottom: 8px; padding: 6px 8px; border-radius: var(--radius-sm); background: rgba(214, 164, 23, 0.14); color: var(--cat-write); font-size: var(--fs-sm); }
 
 /* Diagram: resizable table-list panel + diagram workspace, context menu */
 diagram-view { display: block; height: 100%; }

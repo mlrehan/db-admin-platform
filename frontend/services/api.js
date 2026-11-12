@@ -67,11 +67,21 @@ export class Api {
       max_rows: maxRows ?? null,
     });
   }
-  executeScript(sessionId, sql, maxRows) {
+  // queryId (client-generated UUID) lets the editor cancel the run while it executes.
+  executeScript(sessionId, sql, maxRows, { queryId } = {}) {
     return this.http.post(`/sessions/${sessionId}/script`, {
       sql,
       max_rows: maxRows ?? null,
+      query_id: queryId ?? null,
     });
+  }
+  // Every table/view (+ columns) and routine of the active database, for IntelliSense.
+  getCatalog(sessionId) {
+    return this.http.get(`/sessions/${sessionId}/catalog`);
+  }
+  // Every FK relationship (with cardinality) + many-to-many junction tables, for the diagram.
+  getRelationships(sessionId) {
+    return this.http.get(`/sessions/${sessionId}/relationships`);
   }
   listRunningQueries() {
     return this.http.get("/queries/running");

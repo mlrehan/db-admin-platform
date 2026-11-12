@@ -14,6 +14,7 @@ from app.db.adapters.mssql import MSSQLAdapter
 from app.db.adapters.mysql import MySQLAdapter
 from app.db.adapters.postgresql import PostgreSQLAdapter
 from app.db.adapters.registry import register_adapter, supported_engines
+from app.db.adapters.sqlite import SQLiteAdapter
 from app.db.engines import EngineType
 
 logger = get_logger(__name__)
@@ -23,6 +24,7 @@ def register_builtin_adapters() -> None:
     register_adapter(EngineType.POSTGRESQL, PostgreSQLAdapter)
     register_adapter(EngineType.MYSQL, MySQLAdapter)
     register_adapter(EngineType.MSSQL, MSSQLAdapter)
+    register_adapter(EngineType.SQLITE, SQLiteAdapter)
     logger.info(
         "Registered built-in adapters",
         extra={"engines": sorted(e.value for e in supported_engines())},

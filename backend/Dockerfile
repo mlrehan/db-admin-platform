@@ -42,8 +42,11 @@ RUN pip install . && pip install "alembic>=1.13"
 COPY . .
 
 # Run as a non-root user; strip potential Windows CRLF and ensure the entrypoint is executable.
+# data/sqlite holds SQLite target databases; it exists in the image (owned by appuser) so the
+# named volume mounted there in docker-compose.yml is initialised writable for appuser.
 RUN sed -i 's/\r$//' docker-entrypoint.sh \
     && chmod +x docker-entrypoint.sh \
+    && mkdir -p /app/data/sqlite \
     && useradd --create-home --uid 1000 appuser \
     && chown -R appuser:appuser /app
 USER appuser

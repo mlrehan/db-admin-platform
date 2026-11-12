@@ -67,13 +67,22 @@ export async function confirm({
   text = "",
   confirmText = "Confirm",
   danger = false,
+  code = "", // optional SQL/code shown preformatted above the text (escaped, never HTML)
 } = {}) {
   const Swal = await loadSwal();
-  if (!Swal) return window.confirm(`${title}\n\n${text}`);
+  if (!Swal) return window.confirm(`${title}\n\n${code ? `${code}\n\n` : ""}${text}`);
+  const content = code
+    ? {
+        html:
+          `<pre style="text-align:left;white-space:pre-wrap;font-size:12px;margin:0 0 10px;` +
+          `padding:8px;border-radius:6px;background:rgba(127,127,127,.12)">${escapeText(code)}</pre>` +
+          `<div>${escapeText(text)}</div>`,
+      }
+    : { text };
   const res = await Swal.fire({
     icon: danger ? "warning" : "question",
     title,
-    text,
+    ...content,
     showCancelButton: true,
     confirmButtonText: confirmText,
     cancelButtonText: "Cancel",
@@ -81,6 +90,10 @@ export async function confirm({
     ...themed(danger ? { confirmButtonColor: "#cf222e" } : {}),
   });
   return res.isConfirmed;
+}
+
+function escapeText(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
 // Ask the user for a single line of text. Resolves to the trimmed string, or null if

@@ -50,7 +50,9 @@ class UserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    email: EmailStr
+    # Output is plain str: stored data was validated on input. Re-validating it on the way out
+    # meant one legacy/odd address (e.g. created by an older CLI) made GET /users fail with 500.
+    email: str
     full_name: str | None
     role: Role
     is_active: bool

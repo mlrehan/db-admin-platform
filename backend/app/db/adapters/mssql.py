@@ -52,6 +52,10 @@ class MSSQLAdapter(SQLAlchemyAdapter):
     # T-SQL variables / table variables / cursors are batch-scoped, so a whole script must be
     # sent as ONE batch; results come back via the driver's native nextset().
     script_mode = "batch"
+    # USE <db> works on an open connection; scripts' USE is followed by the session.
+    current_database_sql = "SELECT DB_NAME()"
+    supports_use_statement = True
+    transaction_probe_sql = "SELECT @@TRANCOUNT"
     databases_sql = "SELECT name FROM sys.databases"
     routine_definition_sql = "SELECT OBJECT_DEFINITION(OBJECT_ID(:name))"
     # View/procedure/function/trigger definitions all come from OBJECT_DEFINITION uniformly.

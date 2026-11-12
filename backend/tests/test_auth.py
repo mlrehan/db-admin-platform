@@ -186,3 +186,28 @@ def test_role_permission_matrix() -> None:
         assert not role_has_permission(role, Permission.AUDIT_READ)
         assert role_has_permission(role, Permission.CONNECTION_USE)
         assert role_has_permission(role, Permission.SCHEMA_READ)
+
+
+async def test_user_list_survives_a_stored_odd_email(client: AsyncClient, seed_users, sessionmaker) -> None:
+    # Regression: a user created outside the API (e.g. an older CLI) with an address the API's
+    # input validator rejects must not make GET /users fail with 500 for every admin.
+    from app.auth.roles import Role as _Role
+    from app.models.user import User
+    from app.security import password as _pwd
+
+    async with sessionmaker() as session:
+        session.add(User(email="legacy@lait.test", hashed_password=_pwd.hash_password("x" * 12),
+                         role=_Role.VIEWER, is_active=True))
+        await session.commit()
+    admin = (await _login(client, "admin@test.com", "admin-password-123")).json()
+    resp = await client.get("/api/v1/users", headers={"Authorization": f"Bearer {admin['access_token']}"})
+    assert resp.status_code == 200, resp.text
+    assert "legacy@lait.test" in {u["email"] for u in resp.json()}
+
+
+def test_cli_rejects_emails_the_api_would_reject() -> None:
+    from app.cli import _validated_email
+
+    assert _validated_email("Admin@Example.com") == "admin@example.com"
+    assert _validated_email("verify-admin@lait.test") is None  # reserved TLD
+    assert _validated_email("not-an-email") is None

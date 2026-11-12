@@ -25,6 +25,31 @@ class PostgreSQLAdapter(SQLAlchemyAdapter):
         "SELECT prosrc FROM pg_proc WHERE proname = :name "
         "ORDER BY oid LIMIT 1"
     )
+    # Cancel the script connection's running statement from a side connection.
+    cancel_backend_sql = "SELECT pg_cancel_backend({id})"
+    # IntelliSense catalog straight from pg_catalog (much faster than information_schema on
+    # large databases; format_type yields full types such as "character varying(50)").
+    catalog_columns_sql = (
+        "SELECT n.nspname, c.relname, "
+        "CASE WHEN c.relkind IN ('v','m') THEN 'VIEW' ELSE 'BASE TABLE' END, "
+        "a.attname, format_type(a.atttypid, a.atttypmod), NULL, NULL, NULL, "
+        "CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END "
+        "FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
+        "WHERE c.relkind IN ('r','p','v','m','f') "
+        "AND n.nspname NOT IN ('pg_catalog','information_schema') "
+        "AND n.nspname NOT LIKE 'pg\\_%' "
+        "ORDER BY n.nspname, c.relname, a.attnum"
+    )
+    catalog_routines_sql = (
+        "SELECT n.nspname, p.proname, "
+        "CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END "
+        "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "WHERE n.nspname NOT IN ('pg_catalog','information_schema') "
+        "AND n.nspname NOT LIKE 'pg\\_%' AND p.prokind IN ('f','p') "
+        "ORDER BY n.nspname, p.proname"
+    )
     # Editable-DDL sources (each takes a single :name value, safely bound and cast).
     object_definition_sql = {
         "view": (

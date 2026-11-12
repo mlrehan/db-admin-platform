@@ -14,13 +14,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.roles import Role
 from app.core.exceptions import ConflictError, NotFoundError
+from app.db.session import release_connection
 from app.models.user import User
 from app.security import password as pwd
+
+
+def _invalidate_grants() -> None:
+    from app.services.access_control import invalidate_grant_cache  # local: avoid cycle
+
+    invalidate_grant_cache()
 
 
 class UserService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    @property
+    def session(self) -> AsyncSession:
+        return self._session
 
     # --- reads ---------------------------------------------------------------------------
 
@@ -61,7 +72,7 @@ class UserService:
         user = User(
             email=normalized,
             full_name=full_name,
-            hashed_password=pwd.hash_password(password),
+            hashed_password=await pwd.hash_password_async(password),
             role=role,
             is_active=is_active,
         )
@@ -87,12 +98,13 @@ class UserService:
                 user.token_version += 1
             user.is_active = is_active
         await self._session.flush()
+        _invalidate_grants()  # role changes alter which role grants apply
         return user
 
     async def change_password(
         self, user: User, *, new_password: str, revoke_sessions: bool = True
     ) -> User:
-        user.hashed_password = pwd.hash_password(new_password)
+        user.hashed_password = await pwd.hash_password_async(new_password)
         if revoke_sessions:
             user.token_version += 1
         await self._session.flush()
@@ -113,6 +125,7 @@ class UserService:
             raise NotFoundError("User not found.")
         await self._session.delete(user)
         await self._session.flush()
+        _invalidate_grants()
 
     # --- authentication ------------------------------------------------------------------
 
@@ -123,14 +136,16 @@ class UserService:
         user-enumeration via timing). Transparently upgrades legacy hashes.
         """
         user = await self.get_by_email(email)
+        # The lookup is read-only; don't hold a control-plane connection during the slow hash.
+        await release_connection(self._session)
         if user is None:
-            pwd.hash_password(password)  # equalize timing; result discarded
+            await pwd.hash_password_async(password)  # equalize timing; result discarded
             return None
-        if not pwd.verify_password(user.hashed_password, password):
+        if not await pwd.verify_password_async(user.hashed_password, password):
             return None
         if not user.is_active:
             return None
         if pwd.needs_rehash(user.hashed_password):
-            user.hashed_password = pwd.hash_password(password)
+            user.hashed_password = await pwd.hash_password_async(password)
             await self._session.flush()
         return user

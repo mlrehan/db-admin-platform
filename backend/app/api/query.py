@@ -94,6 +94,11 @@ def _script_out(result: ScriptResult) -> ScriptResultOut:
             )
             for s in result.statements
         ],
+        query_id=result.query_id,
+        active_database=result.active_database,
+        database_changed=result.database_changed,
+        open_transaction=result.open_transaction,
+        execution_ms=result.execution_ms,
     )
 
 
@@ -119,6 +124,7 @@ async def execute_script(
         parameters=payload.params,
         max_rows=payload.max_rows,
         policy=policy,
+        query_id=payload.query_id,
     )
     return _script_out(result)
 

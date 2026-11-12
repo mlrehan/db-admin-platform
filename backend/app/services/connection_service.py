@@ -33,6 +33,10 @@ class ConnectionService:
         self._cipher = cipher
         self._conn_settings = conn_settings or ConnectionSettings()
 
+    @property
+    def session(self) -> AsyncSession:
+        return self._session
+
     # --- reads ---------------------------------------------------------------------------
 
     async def get(self, connection_id: uuid.UUID) -> Connection | None:
@@ -113,7 +117,10 @@ class ConnectionService:
         return conn
 
     async def delete(self, conn: Connection) -> None:
+        from app.services.access_control import invalidate_grant_cache  # local: avoid cycle
+
         await self._session.delete(conn)
+        invalidate_grant_cache()  # its grants go with it
         await self._session.flush()
 
     # --- resolution for the orchestrator -------------------------------------------------

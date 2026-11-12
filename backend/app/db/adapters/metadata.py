@@ -72,3 +72,73 @@ class RoutineInfo:
     name: str
     kind: str  # "procedure" | "function"
     return_type: str | None = None
+
+
+# --- bulk catalog (IntelliSense) --------------------------------------------------------
+#
+# One round trip returns every table/view with its columns for the active database, so the
+# editor's autocomplete never needs one describe-table call per table (N+1).
+
+
+@dataclass(frozen=True)
+class CatalogColumn:
+    name: str
+    data_type: str
+    nullable: bool = True
+
+
+@dataclass(frozen=True)
+class CatalogObject:
+    schema: str | None
+    name: str
+    kind: str  # "table" | "view"
+    columns: tuple[CatalogColumn, ...] = ()
+
+
+@dataclass(frozen=True)
+class CatalogRoutine:
+    schema: str | None
+    name: str
+    kind: str  # "procedure" | "function"
+
+
+@dataclass(frozen=True)
+class Relationship:
+    """A foreign key, with its cardinality derived from the child's keys:
+    ``one-to-one`` when the FK columns are the child's primary key or a unique key,
+    otherwise ``one-to-many`` (one parent row, many child rows)."""
+
+    name: str | None
+    child_schema: str | None
+    child_table: str
+    child_columns: tuple[str, ...]
+    parent_schema: str | None
+    parent_table: str
+    parent_columns: tuple[str, ...]
+    cardinality: str
+    on_delete: str | None = None
+    on_update: str | None = None
+
+
+@dataclass(frozen=True)
+class JunctionTable:
+    """A many-to-many link table: its primary key is made entirely of FK columns that point
+    at two or more different tables (e.g. TutorCourse(TutorId, CourseCode))."""
+
+    schema: str | None
+    table: str
+    parents: tuple[tuple[str | None, str], ...]
+
+
+@dataclass(frozen=True)
+class RelationshipGraph:
+    relationships: tuple[Relationship, ...]
+    junctions: tuple[JunctionTable, ...]
+
+
+@dataclass(frozen=True)
+class Catalog:
+    default_schema: str | None
+    objects: tuple[CatalogObject, ...]
+    routines: tuple[CatalogRoutine, ...]
+    truncated: bool = False  # hit the column cap on a very large database

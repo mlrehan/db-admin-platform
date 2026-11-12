@@ -13,7 +13,9 @@ Run locally with::
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -39,6 +41,15 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialize and tear down process-wide resources."""
     settings: Settings = app.state.settings
+    # Blocking drivers run on the event loop's default thread pool: the SQL Server driver
+    # (aioodbc) executes EVERY ODBC call there, as do Argon2 hashing and sqlite interrupts.
+    # asyncio's default is min(32, cpus + 4) threads — only 6 on a 2-core host — so under
+    # concurrent users all SQL Server I/O queued behind 6 threads. Size it explicitly (the
+    # calls release the GIL while they wait on the network, so this is cheap).
+    io_pool = ThreadPoolExecutor(
+        max_workers=settings.connections.blocking_io_threads, thread_name_prefix="blocking-io"
+    )
+    asyncio.get_running_loop().set_default_executor(io_pool)
     db_session.init_engine(settings.control_db)
 
     if await db_session.ping():
@@ -71,6 +82,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         await orchestrator.stop()
         await db_session.dispose_engine()
+        io_pool.shutdown(wait=False, cancel_futures=True)
         logger.info("Application shutdown complete")
 
 

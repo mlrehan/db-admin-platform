@@ -28,6 +28,28 @@ class MySQLAdapter(SQLAlchemyAdapter):
         "SELECT routine_definition FROM information_schema.routines "
         "WHERE routine_schema = DATABASE() AND routine_name = :name LIMIT 1"
     )
+    # USE <db> works on an open connection; a script's USE is followed by the session.
+    current_database_sql = "SELECT DATABASE()"
+    supports_use_statement = True
+    # Cancel the script connection's running statement from a side connection.
+    cancel_backend_sql = "KILL QUERY {id}"
+    # IntelliSense catalog: the selected database (or every user database at server level);
+    # column_type is already fully formatted ("varchar(50)", "decimal(18,2)").
+    catalog_columns_sql = (
+        "SELECT c.table_schema, c.table_name, t.table_type, c.column_name, c.column_type, "
+        "NULL, NULL, NULL, c.is_nullable "
+        "FROM information_schema.columns c "
+        "JOIN information_schema.tables t "
+        "ON t.table_schema = c.table_schema AND t.table_name = c.table_name "
+        "WHERE (DATABASE() IS NULL AND c.table_schema NOT IN "
+        "('information_schema','mysql','performance_schema','sys')) "
+        "OR c.table_schema = DATABASE() "
+        "ORDER BY c.table_schema, c.table_name, c.ordinal_position"
+    )
+    catalog_routines_sql = (
+        "SELECT routine_schema, routine_name, routine_type FROM information_schema.routines "
+        "WHERE routine_schema = DATABASE() ORDER BY routine_name"
+    )
 
     def _url_query(self) -> dict[str, str]:
         # Full Unicode (incl. 4-byte) support.

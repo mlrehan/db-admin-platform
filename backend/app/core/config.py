@@ -92,8 +92,13 @@ class ControlPlaneDBSettings(BaseSettings):
     name: str = "db_admin_platform"
 
     # Async connection-pool tuning.
-    pool_size: int = Field(default=10, ge=1)
-    max_overflow: int = Field(default=20, ge=0)
+    # Persistent connections are what matter under load: SQLAlchemy closes an *overflow*
+    # connection when it is returned, so a small pool_size makes every burst reconnect (TCP +
+    # auth + asyncpg's per-connection type introspection) on the event loop. Measured with 100
+    # concurrent users: 10+20 → 30+10 halved server-side latency. 40 max stays well under
+    # PostgreSQL's default max_connections=100 for the single API worker.
+    pool_size: int = Field(default=30, ge=1)
+    max_overflow: int = Field(default=10, ge=0)
     pool_timeout: float = Field(default=30.0, gt=0)
     pool_recycle: int = Field(default=1800, ge=0)
     echo_sql: bool = False
@@ -175,6 +180,12 @@ class ConnectionSettings(BaseSettings):
     # Private per-session pool sizing for adapters that pool.
     session_pool_min_size: int = Field(default=1, ge=1)
     session_pool_max_size: int = Field(default=5, ge=1)
+    # Threads for blocking driver calls (SQL Server ODBC I/O, password hashing). asyncio's
+    # default (cpus + 4) starves SQL Server sessions under concurrent users.
+    blocking_io_threads: int = Field(default=64, ge=4, le=512)
+    # Directory holding SQLite database files. A SQLite connection may ONLY open files inside
+    # it (no absolute paths / traversal), so users can't read or write arbitrary server files.
+    sqlite_data_dir: str = Field(default="data/sqlite")
 
 
 class QuerySettings(BaseSettings):

@@ -11,9 +11,9 @@ from __future__ import annotations
 import time
 import uuid
 
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.context import client_ip_ctx, client_private_ip_ctx, request_id_ctx
 from app.core.logging import get_logger
@@ -48,41 +48,63 @@ def _private_ip(request: Request) -> str | None:
     return _peer_ip(request)
 
 
-class RequestContextMiddleware(BaseHTTPMiddleware):
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+class RequestContextMiddleware:
+    """Pure ASGI middleware (not ``BaseHTTPMiddleware``).
+
+    ``BaseHTTPMiddleware`` runs every request through an extra anyio task group and memory
+    stream — measurable CPU on each request, which caps throughput of the single-worker API
+    under many concurrent users. This implementation does the same work (request id, client IP
+    context, access log, X-Request-ID response header) directly on the ASGI messages."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":  # websockets / lifespan pass straight through
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope)
         request_id = request.headers.get(_REQUEST_ID_HEADER) or uuid.uuid4().hex
         token = request_id_ctx.set(request_id)
         ip_token = client_ip_ctx.set(_client_ip(request))
         priv_token = client_private_ip_ctx.set(_private_ip(request))
         start = time.perf_counter()
+        status_code = 500
+
+        async def send_with_request_id(message: Message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+                headers = MutableHeaders(scope=message)
+                headers[_REQUEST_ID_HEADER] = request_id
+                # Standard Server-Timing header: time spent inside the app until the response
+                # was ready (browser dev-tools show it; lets clients separate server time from
+                # network / queueing when diagnosing latency).
+                headers["Server-Timing"] = f"app;dur={(time.perf_counter() - start) * 1000:.1f}"
+            await send(message)
+
         try:
-            response = await call_next(request)
+            await self.app(scope, receive, send_with_request_id)
         except Exception:
-            duration_ms = (time.perf_counter() - start) * 1000
             logger.exception(
                 "Request failed",
                 extra={
-                    "method": request.method,
-                    "path": request.url.path,
-                    "duration_ms": round(duration_ms, 2),
+                    "method": scope.get("method"),
+                    "path": scope.get("path"),
+                    "duration_ms": round((time.perf_counter() - start) * 1000, 2),
                 },
             )
             raise
         else:
-            duration_ms = (time.perf_counter() - start) * 1000
-            response.headers[_REQUEST_ID_HEADER] = request_id
             logger.info(
                 "Request completed",
                 extra={
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status_code": response.status_code,
-                    "duration_ms": round(duration_ms, 2),
+                    "method": scope.get("method"),
+                    "path": scope.get("path"),
+                    "status_code": status_code,
+                    "duration_ms": round((time.perf_counter() - start) * 1000, 2),
                 },
             )
-            return response
         finally:
             request_id_ctx.reset(token)
             client_ip_ctx.reset(ip_token)

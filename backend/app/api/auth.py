@@ -117,7 +117,7 @@ async def change_password(
 ) -> None:
     from app.security import password as pwd
 
-    if not pwd.verify_password(user.hashed_password, payload.current_password):
+    if not await pwd.verify_password_async(user.hashed_password, payload.current_password):
         raise AuthenticationError("Current password is incorrect.")
     # Revokes existing sessions; client must re-authenticate with the new password.
     await service.change_password(user, new_password=payload.new_password)

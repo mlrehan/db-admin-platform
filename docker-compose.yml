@@ -119,6 +119,9 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-app_db}
     ports:
       - "${BACKEND_PORT:-18400}:8000"
+    volumes:
+      # SQLite target databases (files) must survive container re-creation on redeploy.
+      - sqlite_data:/app/data/sqlite
     healthcheck:
       test:
         [
@@ -155,6 +158,7 @@ services:
 
 volumes:
   pgdata:
+  sqlite_data:
   mssql_data:
   mssql_backup:
   mysql_data:

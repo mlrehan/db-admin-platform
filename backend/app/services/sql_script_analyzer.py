@@ -418,8 +418,13 @@ def _strip_comments(sql: str, engine: EngineType) -> str:
 
 
 def _statements_for_analysis(sql: str, engine: EngineType) -> list[str]:
+    # GO is a client batch separator (SSMS/sqlcmd). Remove it FIRST — for every engine — so a
+    # statement placed after a GO line is analyzed on its own. Otherwise "GO\nDROP TABLE t"
+    # would lead with the keyword "go" and be skipped as procedural (a permission bypass).
+    from app.services.sql_batches import strip_go_lines  # local: avoid cycle
+
     out: list[str] = []
-    for stmt in split_sql_statements(sql, engine):
+    for stmt in split_sql_statements(strip_go_lines(sql), engine):
         cleaned = _strip_comments(stmt, engine).strip()
         if cleaned:
             out.extend(_flatten_blocks(cleaned))

@@ -14,6 +14,7 @@ Enforcement is performed at the API/service layer — never only in the UI.
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -22,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.roles import Role
 from app.core.exceptions import AuthorizationError, NotFoundError
+from app.db.session import release_connection
 from app.db.engines import EngineType
 from app.models.access_grant import AccessGrant
 from app.models.user import User
@@ -190,8 +192,10 @@ class AccessPolicy:
                 "You have not been granted access to run queries on this connection.",
                 code="ACCESS_DENIED",
             )
+        from app.services.sql_batches import strip_go_lines  # local: avoid cycle
+
         try:
-            statements = extract_access(sql, engine)
+            statements = extract_access(strip_go_lines(sql), engine)
         except SqlParseError as exc:
             raise AuthorizationError(
                 "Query could not be analyzed for access control and was denied.",
@@ -216,6 +220,25 @@ class AccessPolicy:
                             "table": table,
                         },
                     )
+
+
+# --- grant cache -------------------------------------------------------------------------
+#
+# Every query/schema request needs the caller's grants for the connection. Re-reading them from
+# the control DB on each request costs a pool checkout + round trips + ORM work, which caps the
+# single-worker API's throughput under many concurrent users. They're cached briefly per
+# (user, role, connection). Grant changes made through the app invalidate the cache at once, so
+# revoking access takes effect immediately; the TTL only bounds staleness for changes made
+# directly in the database.
+
+_GRANT_TTL_SECONDS = 10.0
+_GRANT_CACHE_MAX = 20_000
+_grant_cache: dict[tuple, tuple[float, tuple[GrantSpec, ...]]] = {}
+
+
+def invalidate_grant_cache() -> None:
+    """Forget every cached grant set (call after any grant / user / connection change)."""
+    _grant_cache.clear()
 
 
 class AccessControlService:
@@ -243,14 +266,31 @@ class AccessControlService:
                 self._subject_filter(user),
             )
         )
-        return list(result.scalars().all())
+        grants = list(result.scalars().all())
+        # Permission checks are read-only and usually precede slow target-database work:
+        # return the control-plane connection to the pool now (no-op if the request wrote).
+        await release_connection(self._session)
+        return grants
+
+    async def _grant_specs(self, user: User, connection_id: uuid.UUID) -> tuple[GrantSpec, ...]:
+        """The caller's grants for a connection, briefly cached (see ``invalidate_grant_cache``)."""
+        key = (user.id, Role(user.role).value, connection_id)
+        now = time.monotonic()
+        hit = _grant_cache.get(key)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+        specs = tuple(GrantSpec.from_model(g) for g in await self._grants_for(user, connection_id))
+        if len(_grant_cache) >= _GRANT_CACHE_MAX:
+            _grant_cache.clear()
+        _grant_cache[key] = (now + _GRANT_TTL_SECONDS, specs)
+        return specs
 
     async def can_access_connection(self, user: User, connection_id: uuid.UUID) -> bool:
         """Whether a (non-owner) user may *use* a connection because a grant gives them
         access to it. Owners and admins are handled by the caller."""
         if Role(user.role) == Role.ADMIN:
             return True
-        return bool(await self._grants_for(user, connection_id))
+        return bool(await self._grant_specs(user, connection_id))
 
     async def granted_databases(self, user: User, connection_id: uuid.UUID) -> set[str]:
         """The distinct, specific databases a non-admin is granted on a connection.
@@ -259,21 +299,22 @@ class AccessControlService:
         empty set (they are not constrained to any database)."""
         if Role(user.role) == Role.ADMIN:
             return set()
-        grants = await self._grants_for(user, connection_id)
-        return {db for g in grants for db in GrantSpec.from_model(g).databases}
+        specs = await self._grant_specs(user, connection_id)
+        return {db for g in specs for db in g.databases}
 
     async def granted_connection_ids(self, user: User) -> set[uuid.UUID]:
         """Connection ids the user has any grant on (i.e. connections shared with them)."""
         result = await self._session.execute(
             select(AccessGrant.connection_id).where(self._subject_filter(user)).distinct()
         )
-        return {row[0] for row in result.all()}
+        ids = {row[0] for row in result.all()}
+        await release_connection(self._session)
+        return ids
 
     async def policy_for(self, user: User, connection_id: uuid.UUID) -> AccessPolicy:
         if Role(user.role) == Role.ADMIN:
             return AccessPolicy(is_admin=True, has_grants=False, grants=())
-        grants = await self._grants_for(user, connection_id)
-        specs = tuple(GrantSpec.from_model(g) for g in grants)
+        specs = await self._grant_specs(user, connection_id)
         return AccessPolicy(is_admin=False, has_grants=bool(specs), grants=specs)
 
     # --- CRUD (admin) ---------------------------------------------------------------------
@@ -316,6 +357,7 @@ class AccessControlService:
         )
         self._session.add(grant)
         await self._session.flush()
+        invalidate_grant_cache()
         return grant
 
     async def get_grant(self, grant_id: uuid.UUID) -> AccessGrant | None:
@@ -353,11 +395,13 @@ class AccessControlService:
             grant.database = None
             grant.table_name = None
         await self._session.flush()
+        invalidate_grant_cache()
         return grant
 
     async def delete_grant(self, grant_id: uuid.UUID) -> None:
         result = await self._session.execute(
             delete(AccessGrant).where(AccessGrant.id == grant_id)
         )
+        invalidate_grant_cache()
         if result.rowcount == 0:
             raise NotFoundError("Access grant not found.")

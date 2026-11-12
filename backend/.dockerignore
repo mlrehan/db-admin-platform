@@ -10,3 +10,4 @@ tests/
 *.log
 htmlcov/
 .coverage
+data/

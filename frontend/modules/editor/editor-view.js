@@ -4,8 +4,21 @@
 
 import { app } from "../../core/context.js";
 import { bus, Events } from "../../core/events.js";
-import { sessionStore, takePendingEditorSql } from "../../core/session-state.js";
+import {
+  sessionStore,
+  setActiveDatabase,
+  takePendingEditorSql,
+} from "../../core/session-state.js";
 import { clearMetadataCache } from "../../core/metadata-cache.js";
+import { loadCatalog } from "../../core/catalog-store.js";
+
+function newQueryId() {
+  if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
+  // RFC 4122 v4 fallback for older browsers / non-secure contexts.
+  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
+    (c ^ (Math.random() * 16) >> (c / 4)).toString(16)
+  );
+}
 import { escapeHtml } from "../../components/view-helpers.js";
 import "../../components/session-bar.js";
 import "../../components/code-editor.js";
@@ -71,7 +84,16 @@ export class EditorView extends HTMLElement {
     // Persist the draft on every edit (debounced).
     this.addEventListener("editor-change", () => this._saveDraft());
 
-    this._runBtn.addEventListener("click", () => this._run());
+    this._runBtn.addEventListener("click", () => (this._running ? this._cancel() : this._run()));
+    // Warm the IntelliSense catalog for the active session/database (and on every switch), so
+    // the first suggestion list already contains the tables.
+    const prefetch = () => {
+      const { sessionId, database } = sessionStore.getState();
+      if (sessionId) loadCatalog(sessionId, database).catch(() => {});
+    };
+    this._unsubCatalog = sessionStore.subscribe(prefetch);
+    this._unsubCatalogMeta = bus.on(Events.METADATA_CHANGED, prefetch);
+    prefetch();
     this.addEventListener("run", () => this._run());
     this.querySelector("#open-file").addEventListener("click", () => this._fileInput.click());
     this.querySelector("#save-file").addEventListener("click", () => this._saveFile());
@@ -154,6 +176,9 @@ export class EditorView extends HTMLElement {
     // Flush any pending draft immediately when leaving the editor.
     clearTimeout(this._draftTimer);
     this._writeDraft();
+    // Release store/bus subscriptions so a closed editor isn't kept alive (no leaks).
+    this._unsubCatalog?.();
+    this._unsubCatalogMeta?.();
   }
 
   _saveDraft() {
@@ -282,27 +307,77 @@ export class EditorView extends HTMLElement {
     const sql = (selected || this._editor.getValue()).trim();
     if (!sql) return;
 
-    this._runBtn.disabled = true;
-    this._runBtn.innerHTML = `<span class="spinner sm"></span> Running…`;
+    if (this._running) return; // one run at a time per editor (the session is serialized)
+    // A client-generated id lets the user cancel this run while it is still executing.
+    const queryId = newQueryId();
+    this._running = { queryId };
+    this._runBtn.classList.remove("btn-primary");
+    this._runBtn.classList.add("btn-danger");
+    this._runBtn.innerHTML = `<span class="spinner sm"></span> Cancel`;
+    this._runBtn.title = "Cancel the running query";
     this._status.innerHTML = `<span class="muted">Executing${selected ? " selection" : ""}…</span>`;
     this._selectTab("results");
     this._setBusy(true, `Executing${selected ? " selection" : ""}…`);
     const start = performance.now();
     try {
-      const res = await app.api.executeScript(sessionId, sql);
+      const res = await app.api.executeScript(sessionId, sql, undefined, { queryId });
       this._render(res, Math.round(performance.now() - start));
       // The script may have created/dropped/altered objects — drop cached metadata so the
-      // Schema Explorer, Data Viewer and database list show the updated structure immediately.
-      if (res.statements?.some((s) => s.success && s.category === "ddl")) {
+      // Schema Explorer, Data Viewer, diagram, database list and IntelliSense refresh.
+      if (res.statements?.some((s) => s.category === "ddl")) {
         clearMetadataCache();
         bus.emit(Events.METADATA_CHANGED, { sessionId });
       }
+      // A USE in the script switched the session's database (SSMS updates its selector).
+      if (res.database_changed && res.active_database) {
+        setActiveDatabase(res.active_database);
+        bus.emit(Events.METADATA_CHANGED, { sessionId, database: res.active_database });
+        bus.emit(Events.TOAST, { message: `Database context changed to "${res.active_database}"`, kind: "info" });
+      }
+      this._showTransactionState(!!res.open_transaction);
     } catch (err) {
       this._results.innerHTML = `<div class="grid-empty muted">—</div>`;
       this._status.innerHTML = `<span style="color:var(--danger)">✕ ${escapeHtml(err.message)}</span>`;
     } finally {
+      this._running = null;
       this._runBtn.disabled = false;
+      this._runBtn.classList.remove("btn-danger");
+      this._runBtn.classList.add("btn-primary");
+      this._runBtn.title = "Run (Ctrl+Enter)";
       this._runBtn.innerHTML = `▶ Run <span class="muted">⌘⏎</span>`;
+    }
+  }
+
+  // Cancel the in-flight run: the server cancels the statement at the database (ODBC SQLCancel /
+  // pg_cancel_backend / KILL QUERY / sqlite interrupt) and the run resolves as "cancelled".
+  async _cancel() {
+    const running = this._running;
+    if (!running || running.cancelling) return;
+    running.cancelling = true;
+    this._runBtn.disabled = true;
+    this._runBtn.innerHTML = `<span class="spinner sm"></span> Cancelling…`;
+    try {
+      await app.api.cancelQuery(running.queryId);
+    } catch {
+      /* already finished — the run's own response arrives anyway */
+    }
+  }
+
+  // A transaction left open (BEGIN TRAN without COMMIT/ROLLBACK) is easy to forget and holds
+  // locks — show a persistent warning chip until a later run ends it.
+  _showTransactionState(open) {
+    let chip = this.querySelector("#tx-chip");
+    if (!open) {
+      chip?.remove();
+      return;
+    }
+    if (!chip) {
+      chip = document.createElement("span");
+      chip.id = "tx-chip";
+      chip.className = "badge tx-open";
+      chip.title = "A transaction is open on this session. Run COMMIT or ROLLBACK.";
+      chip.textContent = "⚠ Open transaction";
+      this.querySelector(".editor-toolbar .spacer")?.after(chip);
     }
   }
 
@@ -341,17 +416,18 @@ export class EditorView extends HTMLElement {
       this._results.innerHTML = `<div class="grid-empty muted">No result set returned.</div>`;
     }
 
-    // Messages: one line per statement.
-    this._messages.innerHTML = stmts
-      .map((s, i) => this._messageLine(s, i + 1))
-      .join("");
+    // Messages: server messages, result summaries and errors (SSMS "Messages" tab).
+    this._messages.innerHTML = this._messagesHtml(stmts, ms);
 
-    const failed = stmts.find((s) => !s.success);
+    const failures = stmts.filter((s) => !s.success);
+    const failed = failures[0];
     const okCount = stmts.filter((s) => s.success).length;
     if (failed) {
+      // Errors already carry their location (e.g. "Batch 6 (line 21): Msg 137: …").
+      const more = failures.length > 1 ? ` <span class="muted">(+${failures.length - 1} more — see Messages)</span>` : "";
       this._status.innerHTML =
-        `<span class="badge cat-ddl">error</span> ` +
-        `<span style="color:var(--danger)">✕ Statement ${stmts.indexOf(failed) + 1}: ${escapeHtml(failed.error || failed.error_code)}</span>`;
+        `<span class="badge cat-ddl">${failed.error_code === "QUERY_CANCELLED" ? "cancelled" : "error"}</span> ` +
+        `<span style="color:var(--danger)">✕ ${escapeHtml(failed.error || failed.error_code)}</span>${more}`;
       // If the script still produced result sets before failing, keep them visible (SSMS shows
       // the results plus the error). Otherwise focus the Messages tab.
       this._selectTab(resultSets.length ? "results" : "messages");
@@ -370,23 +446,30 @@ export class EditorView extends HTMLElement {
     }
   }
 
-  _messageLine(s, n) {
-    const cat = { read: "cat-read", write: "cat-write", ddl: "cat-ddl" }[s.category] || "";
-    const icon = s.success
-      ? '<span style="color:var(--success)">✓</span>'
-      : '<span style="color:var(--danger)">✕</span>';
-    const detail = s.success
-      ? s.returns_rows
-        ? `${s.row_count} row(s)`
-        : `${s.rows_affected ?? 0} affected`
-      : escapeHtml(s.error || s.error_code || "failed");
-    return `<div class="msg-line">
-      ${icon} <span class="muted">#${n}</span>
-      <span class="badge ${cat}">${escapeHtml(s.category)}</span>
-      <code class="msg-sql">${escapeHtml(s.sql.slice(0, 90))}${s.sql.length > 90 ? "…" : ""}</code>
-      <span class="spacer"></span>
-      <span class="${s.success ? "muted" : ""}" style="${s.success ? "" : "color:var(--danger)"}">${detail}</span>
-    </div>`;
+  // SSMS-style Messages tab: result-set summaries, server messages (row counts, PRINT output,
+  // "Changed database context…"), and errors — each error already names its batch/statement.
+  _messagesHtml(stmts, ms) {
+    let resultNo = 0;
+    const lines = stmts.map((s) => {
+      if (!s.success) {
+        return `<div class="msg-line msg-error"><span>✕</span>
+          <pre class="msg-text">${escapeHtml(s.error || s.error_code || "failed")}</pre></div>`;
+      }
+      if (s.returns_rows) {
+        resultNo += 1;
+        return `<div class="msg-line"><span style="color:var(--success)">✓</span>
+          <span class="msg-text">Result ${resultNo}: ${s.row_count} row(s) returned${s.truncated ? " (truncated)" : ""}</span></div>`;
+      }
+      // A message outcome carries the server/engine message in `sql`; the lone fallback outcome
+      // (nothing else produced) carries the script itself.
+      const text = stmts.length === 1 && s.execution_ms > 0 ? "Commands completed successfully." : s.sql;
+      return `<div class="msg-line"><span class="muted">›</span>
+        <pre class="msg-text">${escapeHtml(text)}</pre></div>`;
+    });
+    lines.push(`<div class="msg-line msg-footer muted">Completion time: ${escapeHtml(
+      new Date().toLocaleString()
+    )} · ${ms} ms</div>`);
+    return lines.join("");
   }
 }
 

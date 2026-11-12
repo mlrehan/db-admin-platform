@@ -70,6 +70,60 @@ class RoutineOut(BaseModel):
     return_type: str | None = None
 
 
+class CatalogColumnOut(BaseModel):
+    name: str
+    type: str
+    nullable: bool = True
+
+
+class CatalogObjectOut(BaseModel):
+    schema_name: str | None = None
+    name: str
+    kind: str  # "table" | "view"
+    columns: list[CatalogColumnOut]
+
+
+class CatalogRoutineOut(BaseModel):
+    schema_name: str | None = None
+    name: str
+    kind: str  # "procedure" | "function"
+
+
+class CatalogOut(BaseModel):
+    """Everything SQL IntelliSense needs for the session's active database, in one response."""
+
+    dialect: str
+    database: str | None = None
+    default_schema: str | None = None
+    objects: list[CatalogObjectOut]
+    routines: list[CatalogRoutineOut]
+    truncated: bool = False
+
+
+class RelationshipOut(BaseModel):
+    name: str | None = None
+    child_schema: str | None = None
+    child_table: str
+    child_columns: list[str]
+    parent_schema: str | None = None
+    parent_table: str
+    parent_columns: list[str]
+    cardinality: str  # "one-to-one" | "one-to-many"
+    on_delete: str | None = None
+    on_update: str | None = None
+
+
+class JunctionOut(BaseModel):
+    schema_name: str | None = None
+    table: str
+    parents: list[list[str | None]]  # [[schema, table], …] — the tables it links many-to-many
+
+
+class RelationshipsOut(BaseModel):
+    relationships: list[RelationshipOut]
+    junctions: list[JunctionOut]
+
+
 class ObjectDefinitionOut(BaseModel):
     """The editable DDL/definition script for a database object (table/view/procedure/
     function/trigger/index)."""

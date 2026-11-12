@@ -54,6 +54,13 @@ class _RunningQuery:
     task: asyncio.Task[Any]
     started_at: datetime
     category: str
+    # The session's adapter, for a driver-level (server-side) cancel.
+    adapter: Any = None
+
+
+# After a driver-level cancel, how long a run may take to wind down by itself (keeping the
+# results it already produced) before its task is hard-cancelled.
+_CANCEL_GRACE_SECONDS = 3.0
 
 
 @dataclass(frozen=True)
@@ -91,6 +98,13 @@ class StatementOutcome:
 class ScriptResult:
     statements: list[StatementOutcome]
     success: bool
+    query_id: uuid.UUID | None = None
+    # The session's database after the run (a script's USE switches it, like SSMS).
+    active_database: str | None = None
+    database_changed: bool = False
+    # The script left an explicit transaction open on the session.
+    open_transaction: bool = False
+    execution_ms: float = 0.0
 
 
 class QueryEngine:
@@ -252,6 +266,7 @@ class QueryEngine:
             user, session, analysis, started, success=True,
             row_count=result.row_count, rows_affected=result.rows_affected,
         )
+        self._invalidate_metadata_if_ddl(session, analysis)
         return ExecuteResult(
             query_id=query_id,
             columns=result.columns,
@@ -276,6 +291,7 @@ class QueryEngine:
         parameters: Mapping[str, Any] | None = None,
         max_rows: int | None = None,
         policy: AccessPolicy | None = None,
+        query_id: uuid.UUID | None = None,
     ) -> ScriptResult:
         """Run a whole multi-statement script in ONE database session (SSMS/DataGrip style).
 
@@ -289,16 +305,25 @@ class QueryEngine:
         capped = self._cap_rows(max_rows)
         analysis = self._guard.analyze(sql)  # category/destructive for audit
         started = QueryAuditEvent.now()
+        query_id = query_id or uuid.uuid4()
 
         async with session.lock:
             session.touch()
+            task: asyncio.Task[Any] | None = None
             try:
                 await self._enforce_script(user, sql, analysis, session, policy)
-                run = await asyncio.wait_for(
-                    session.adapter.run_script(sql, max_rows=capped),
-                    self._settings.statement_timeout_seconds,
-                )
-            except (TimeoutError, AppError, Exception) as exc:  # noqa: BLE001
+                # Run as a registered task so the user can cancel it (POST /queries/{id}/cancel)
+                # and it shows in the running-queries list, exactly like single statements.
+                task = asyncio.create_task(session.adapter.run_script(sql, max_rows=capped))
+                self._register(query_id, user, session, task, analysis, script=True)
+                run = await asyncio.wait_for(task, self._settings.statement_timeout_seconds)
+            except (TimeoutError, asyncio.CancelledError, AppError, Exception) as exc:  # noqa: BLE001
+                if isinstance(exc, (TimeoutError, asyncio.CancelledError)):
+                    # Stop the work server-side (driver-level cancel) and discard the session's
+                    # script connection — it may still be busy or mid-transaction.
+                    await self._abort_script(session)
+                    # A cancelled/timed-out DDL script may have partly applied.
+                    self._invalidate_metadata_if_ddl(session, analysis)
                 code, message = self._classify_error(exc)
                 await self._audit_event(
                     user, session, analysis, started, success=False,
@@ -314,12 +339,20 @@ class QueryEngine:
                         )
                     ],
                     success=False,
+                    query_id=query_id,
+                    active_database=session.adapter.active_database,
                 )
+            finally:
+                self._unregister(query_id)
 
+        self._invalidate_metadata_if_ddl(session, analysis)
+        errors = run.all_errors
         total_rows = sum(len(rs.rows) for rs in run.result_sets)
+        cancelled = any("cancelled by the user" in e for e in errors)
         await self._audit_event(
-            user, session, analysis, started, success=run.error is None, row_count=total_rows,
-            error_code="QUERY_EXECUTION_ERROR" if run.error else None, error=run.error,
+            user, session, analysis, started, success=not errors, row_count=total_rows,
+            error_code=("QUERY_CANCELLED" if cancelled else "QUERY_EXECUTION_ERROR") if errors else None,
+            error="\n".join(errors) if errors else None,
         )
 
         # Map each result set to a row-returning outcome and each row-count to a message
@@ -346,17 +379,21 @@ class QueryEngine:
                     error_code=None, error=None,
                 )
             )
-        if run.error:
+        # One failed outcome per error — for GO scripts each is attributed to its batch.
+        for err in errors:
+            code = (
+                "QUERY_CANCELLED" if "cancelled by the user" in err else "QUERY_EXECUTION_ERROR"
+            )
             outcomes.append(
                 StatementOutcome(
                     sql=sql, success=False, returns_rows=False, columns=[], rows=[],
                     row_count=0, rows_affected=None, execution_ms=run.execution_ms,
                     truncated=False, category=analysis.category.value,
                     destructive=analysis.destructive,
-                    error_code="QUERY_EXECUTION_ERROR", error=run.error,
+                    error_code=code, error=err,
                 )
             )
-        elif not outcomes:  # ran cleanly but produced no rows / row-count (e.g. pure DDL)
+        if not outcomes:  # ran cleanly but produced no rows / row-count (e.g. pure DDL)
             outcomes.append(
                 StatementOutcome(
                     sql=sql, success=True, returns_rows=False, columns=[], rows=[],
@@ -365,12 +402,53 @@ class QueryEngine:
                     destructive=analysis.destructive, error_code=None, error=None,
                 )
             )
-        return ScriptResult(statements=outcomes, success=run.error is None)
+        return ScriptResult(
+            statements=outcomes,
+            success=not errors,
+            query_id=query_id,
+            active_database=session.adapter.active_database,
+            database_changed=bool(getattr(run, "database_changed_to", None)),
+            open_transaction=bool(getattr(run, "open_transaction", False)),
+            execution_ms=run.execution_ms,
+        )
 
     @staticmethod
-    def _classify_error(exc: Exception) -> tuple[str, str]:
+    def _invalidate_metadata_if_ddl(session: LiveSession, analysis: SqlAnalysis) -> None:
+        """Structure may have changed (CREATE/ALTER/DROP/… or something unclassifiable): drop
+        the connection's cached metadata so every user's explorer, diagram and IntelliSense
+        see the change on their next read."""
+        from app.services.metadata_cache import metadata_cache  # local: avoid cycle
+        from app.services.sql_guard import StatementCategory
+
+        if analysis.destructive or any(
+            s.category in (StatementCategory.DDL, StatementCategory.UNKNOWN)
+            for s in analysis.statements
+        ):
+            metadata_cache.invalidate(session.connection_id)
+
+    async def _abort_script(self, session: LiveSession) -> None:
+        """Best-effort hard stop of a cancelled / timed-out script: ask the driver to cancel
+        the in-flight statement, then discard the session's script connection."""
+        adapter = session.adapter
+        cancel = getattr(adapter, "cancel_running", None)
+        if cancel is not None:
+            try:
+                await cancel()
+            except Exception:  # noqa: BLE001
+                logger.warning("Driver-level cancel failed", exc_info=True)
+        release = getattr(adapter, "_release_script_connection", None)
+        if release is not None:
+            try:
+                await release()
+            except Exception:  # noqa: BLE001
+                logger.warning("Releasing script connection failed", exc_info=True)
+
+    @staticmethod
+    def _classify_error(exc: BaseException) -> tuple[str, str]:
         if isinstance(exc, TimeoutError):
             return "QUERY_TIMEOUT", "Statement exceeded the time limit."
+        if isinstance(exc, asyncio.CancelledError):
+            return "QUERY_CANCELLED", "Query was cancelled."
         if isinstance(exc, AppError):
             return exc.code, exc.message
         return "QUERY_EXECUTION_ERROR", str(exc).strip() or exc.__class__.__name__
@@ -500,10 +578,28 @@ class QueryEngine:
     # --- cancellation --------------------------------------------------------------------
 
     async def cancel(self, query_id: uuid.UUID, *, user_id: uuid.UUID) -> None:
+        """Cancel a running query.
+
+        The statement is cancelled **at the database first** (ODBC ``SQLCancel`` /
+        ``pg_cancel_backend`` / ``KILL QUERY`` / sqlite ``interrupt``): cancelling only the
+        asyncio task would leave SQL Server still executing inside the ODBC worker thread. The
+        run then ends on its own — keeping any result sets produced before the cancel, like
+        SSMS. If it hasn't stopped within a short grace period, the task is hard-cancelled."""
         async with self._lock:
             running = self._running.get(query_id)
             if running is None or running.user_id != user_id:
                 raise NotFoundError("No such running query.")
+        driver_cancel = getattr(running.adapter, "cancel_running", None)
+        if driver_cancel is not None:
+            try:
+                await driver_cancel()
+            except Exception:  # noqa: BLE001 - fall back to cancelling the task
+                logger.warning("Driver-level cancel failed", exc_info=True)
+            try:
+                await asyncio.wait_for(asyncio.shield(running.task), _CANCEL_GRACE_SECONDS)
+            except BaseException:  # noqa: BLE001 - finished with an error / still running
+                pass
+        if not running.task.done():
             running.task.cancel()
 
     async def list_running(self, *, user_id: uuid.UUID) -> list[_RunningQuery]:
@@ -523,6 +619,8 @@ class QueryEngine:
         session: LiveSession,
         task: asyncio.Task[Any],
         analysis: SqlAnalysis,
+        *,
+        script: bool = False,
     ) -> None:
         self._running[query_id] = _RunningQuery(
             id=query_id,
@@ -531,6 +629,9 @@ class QueryEngine:
             task=task,
             started_at=QueryAuditEvent.now(),
             category=analysis.category.value,
+            # Scripts run on the session's dedicated connection, so they can be cancelled at
+            # the driver level; single statements use a pooled connection (task cancel).
+            adapter=session.adapter if script else None,
         )
 
     def _unregister(self, query_id: uuid.UUID) -> None:
