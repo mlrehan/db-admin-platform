@@ -472,9 +472,56 @@ audit-log {
 .viewer-controls .input {
   width: auto;
 }
+.viewer-controls {
+  flex-wrap: wrap;
+  row-gap: var(--sp-2);
+}
+/* The Data Viewer's single pager (server-side pages). Kept together as one unit. */
+.viewer-pager {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
+.viewer-pager .btn {
+  min-width: 34px;
+  padding-inline: var(--sp-2);
+  font-size: 18px;
+  line-height: 1;
+}
+.viewer-pagesize {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-right: var(--sp-2);
+  white-space: nowrap;
+}
+.viewer-pageinfo {
+  padding: 0 var(--sp-2);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 760px) {
+  /* Phones: page size on its own line, then « ‹ status › » together on one line. */
+  .viewer-pager {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .viewer-pagesize {
+    width: 100%;
+    margin-right: 0;
+  }
+  .viewer-pageinfo {
+    flex: 1;
+    text-align: center;
+    padding: 0;
+  }
+}
 
-/* Schema tree */
-.tree {
+/* Schema tree. Scoped to the Schema Explorer: Monaco's suggestion list also has an internal
+   ".tree" element, and a global padding here stole 16px from it — the last suggestion was cut
+   off, and a single match was squashed to a thin bar. */
+schema-view .tree {
   overflow: auto;
   flex: 1;
   padding: var(--sp-2);

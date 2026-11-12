@@ -18,7 +18,7 @@ from app.db.adapters.metadata import (
     TableDetail,
     TableInfo,
 )
-from app.services.metadata_cache import MetadataCache, metadata_cache, scope_key
+from app.services.metadata_cache import MetadataCache, metadata_cache, scope_key, server_identity
 from app.services.orchestrator import LiveSession
 
 
@@ -31,16 +31,24 @@ class MetadataService:
         self._cache = cache or metadata_cache
 
     def _scope(self, session: LiveSession) -> tuple:
+        self._link(session)
         return scope_key(session.connection_id, session.adapter.active_database)
 
+    def _link(self, session: LiveSession) -> None:
+        # Remember which server this connection targets so DDL through ANOTHER connection to
+        # the same server also refreshes this connection's cached metadata.
+        self._cache.link(session.connection_id, server_identity(session.adapter.config))
+
     def invalidate(self, session: LiveSession) -> None:
-        """Forget everything cached for the session's connection (all databases)."""
-        self._cache.invalidate(session.connection_id)
+        """Forget everything cached for the session's connection (all databases) and for any
+        other connection to the same server."""
+        self._cache.invalidate(session.connection_id, server=server_identity(session.adapter.config))
 
     async def list_databases(self, session: LiveSession) -> list[DatabaseInfo]:
         session.touch()
         # The database list is per connection (not per database); the active flag is applied
         # per session afterwards since sessions may target different databases.
+        self._link(session)
         cached = await self._cache.get_or_load(
             (session.connection_id, "*", "databases"),
             session.adapter.list_databases,

@@ -87,6 +87,8 @@ class CatalogRoutineOut(BaseModel):
     schema_name: str | None = None
     name: str
     kind: str  # "procedure" | "function"
+    params: list[str] | None = None  # e.g. ["@CustomerId int", "@Total money OUTPUT"]
+    returns: str | None = None
 
 
 class CatalogOut(BaseModel):

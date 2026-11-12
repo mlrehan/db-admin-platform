@@ -151,3 +151,40 @@ async def test_revoked_grant_takes_effect_immediately_despite_grant_cache(
     assert (await client.delete(f"/api/v1/access/grants/{grant['id']}", headers=admin)).status_code == 204
     denied = await client.post(f"/api/v1/sessions/{sid}/query", headers=user, json={"sql": "SELECT * FROM users"})
     assert denied.status_code == 403
+
+
+async def test_invalidation_reaches_other_connections_to_the_same_server() -> None:
+    cache = MetadataCache(ttl_seconds=60)
+
+    async def load():
+        return ["x"]
+
+    server_a = ("sqlite", "", 0)
+    server_b = ("postgresql", "db.internal", 5432)
+    for scope, server in (("c1", server_a), ("c2", server_a), ("c3", server_b)):
+        cache.link(scope, server)
+        await cache.get_or_load((scope, "*", "databases"), load)
+    assert cache.stats()["entries"] == 3
+
+    # A database created through c1 must show up for c2 (same server) — but c3 is unrelated.
+    assert cache.invalidate("c1") == 2
+    remaining = [k[0] for k in cache._data]  # noqa: SLF001
+    assert remaining == ["c3"]
+
+
+async def test_ddl_via_one_connection_refreshes_another_connection_to_same_server(
+    client: AsyncClient, seed_users, fake_pg
+) -> None:
+    from app.services.metadata_cache import metadata_cache
+
+    admin = await _login(client, "admin@test.com", "admin-password-123")
+    sid_a = await _session(client, admin)  # both connections target host "h"
+    sid_b = await _session(client, admin)
+    for sid in (sid_a, sid_b):
+        assert (await client.get(f"/api/v1/sessions/{sid}/catalog", headers=admin)).status_code == 200
+    misses = metadata_cache.stats()["misses"]
+
+    await client.post(f"/api/v1/sessions/{sid_a}/script", headers=admin,
+                      json={"sql": "CREATE TABLE t3 (id int)"})
+    await client.get(f"/api/v1/sessions/{sid_b}/catalog", headers=admin)
+    assert metadata_cache.stats()["misses"] == misses + 1  # B reloaded instead of serving stale

@@ -307,7 +307,10 @@ async def get_catalog(
         if visible_schema(o.schema) and policy.table_visible(database, o.schema, o.name)
     ]
     routines = [
-        CatalogRoutineOut(schema_name=r.schema, name=r.name, kind=r.kind)
+        CatalogRoutineOut(
+            schema_name=r.schema, name=r.name, kind=r.kind,
+            params=list(r.params) if r.params is not None else None, returns=r.returns,
+        )
         for r in catalog.routines
         if visible_schema(r.schema) and (policy.is_admin or policy.has_grants)
     ]

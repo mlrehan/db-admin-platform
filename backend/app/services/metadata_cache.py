@@ -10,8 +10,11 @@ the editor would each run the same catalog queries against the target database.
   metadata). Per-user access filtering is applied *after* the cache, at the API layer.
 * **Single-flight** — concurrent misses for the same key share ONE database round trip.
 * **Freshness** — a TTL bounds staleness for changes made outside the platform, and any DDL run
-  through the platform invalidates the connection's entries immediately. A generation counter
-  prevents a load that raced with an invalidation from re-inserting stale data.
+  through the platform invalidates the connection's entries immediately — and those of every
+  OTHER saved connection pointing at the same server (two connections to one SQL Server, or all
+  SQLite connections sharing the data directory), so a database created through one connection
+  shows up at once in the others. A generation counter prevents a load that raced with an
+  invalidation from re-inserting stale data.
 * **Bounded** — LRU eviction caps memory.
 """
 
@@ -36,6 +39,10 @@ class MetadataCache:
         self._data: OrderedDict[Key, tuple[float, Any]] = OrderedDict()
         self._inflight: dict[Key, asyncio.Future[Any]] = {}
         self._generation: dict[Any, int] = {}
+        # scope (connection id) -> server identity, so DDL through one connection also
+        # invalidates other connections to the same server. Bounded by the number of saved
+        # connections.
+        self._server_of: dict[Any, Any] = {}
         self.hits = 0
         self.misses = 0
 
@@ -84,8 +91,22 @@ class MetadataCache:
                 self._data.popitem(last=False)
         return value
 
-    def invalidate(self, scope: Any, database: str | None = None) -> int:
-        """Drop every entry for a connection (optionally one database). Returns the count."""
+    def link(self, scope: Any, server: Any) -> None:
+        """Record which server a scope (connection) points at — see :func:`server_identity`."""
+        if server is not None:
+            self._server_of[scope] = server
+
+    def invalidate(self, scope: Any, database: str | None = None, *, server: Any = None) -> int:
+        """Drop every entry for a connection (optionally one database) AND for every other
+        connection known to point at the same server. Returns the number of entries dropped."""
+        self.link(scope, server)
+        target = self._server_of.get(scope)
+        scopes = {scope}
+        if target is not None:
+            scopes |= {s for s, srv in self._server_of.items() if srv == target}
+        return sum(self._invalidate_scope(s, database) for s in scopes)
+
+    def _invalidate_scope(self, scope: Any, database: str | None) -> int:
         self._generation[scope] = self._generation.get(scope, 0) + 1
         doomed = [
             k for k in self._data
@@ -98,6 +119,7 @@ class MetadataCache:
     def clear(self) -> None:
         self._data.clear()
         self._generation.clear()
+        self._server_of.clear()
         self.hits = 0
         self.misses = 0
 
@@ -108,6 +130,13 @@ class MetadataCache:
 
 def _db_key(database: str | None) -> str:
     return (database or "").lower()
+
+
+def server_identity(config: Any) -> tuple[str, str, int]:
+    """Identity of the server a connection points at: engine + host + port. Every SQLite
+    connection maps to the same identity (they share the server's data directory)."""
+    engine = getattr(config.engine, "value", config.engine)
+    return (str(engine), (config.host or "").strip().lower(), int(config.port or 0))
 
 
 def scope_key(connection_id: uuid.UUID, database: str | None) -> tuple[uuid.UUID, str]:

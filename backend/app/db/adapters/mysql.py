@@ -50,6 +50,12 @@ class MySQLAdapter(SQLAlchemyAdapter):
         "SELECT routine_schema, routine_name, routine_type FROM information_schema.routines "
         "WHERE routine_schema = DATABASE() ORDER BY routine_name"
     )
+    # DTD_IDENTIFIER is the full declared type, e.g. varchar(50) / decimal(10,2).
+    catalog_routine_params_sql = (
+        "SELECT SPECIFIC_SCHEMA, SPECIFIC_NAME, ORDINAL_POSITION, PARAMETER_MODE, PARAMETER_NAME, "
+        "DTD_IDENTIFIER, NULL, NULL, NULL FROM information_schema.parameters "
+        "WHERE SPECIFIC_SCHEMA = DATABASE() ORDER BY SPECIFIC_NAME, ORDINAL_POSITION"
+    )
 
     def _url_query(self) -> dict[str, str]:
         # Full Unicode (incl. 4-byte) support.

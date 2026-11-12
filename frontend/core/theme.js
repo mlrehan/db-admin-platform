@@ -12,8 +12,17 @@ export function getTheme() {
   }
 }
 
+// Fired on window whenever the theme changes, so components that render with their own
+// theming (Monaco editor, AG Grid) can follow the app theme live: detail = { theme }.
+export const THEME_EVENT = "dbadmin:themechange";
+
+export function isDarkTheme() {
+  return (document.documentElement.dataset.theme || getTheme()) !== "light";
+}
+
 export function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
+  window.dispatchEvent(new CustomEvent(THEME_EVENT, { detail: { theme } }));
 }
 
 export function setTheme(theme) {

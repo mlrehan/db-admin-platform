@@ -42,9 +42,13 @@ class PostgreSQLAdapter(SQLAlchemyAdapter):
         "AND n.nspname NOT LIKE 'pg\\_%' "
         "ORDER BY n.nspname, c.relname, a.attnum"
     )
+    # Five columns: the argument list and result type come inline (pg_get_function_*), which
+    # also handles overloads and defaults better than information_schema.parameters.
+    catalog_routine_params_sql = None
     catalog_routines_sql = (
         "SELECT n.nspname, p.proname, "
-        "CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END "
+        "CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, "
+        "pg_get_function_arguments(p.oid), pg_get_function_result(p.oid) "
         "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
         "WHERE n.nspname NOT IN ('pg_catalog','information_schema') "
         "AND n.nspname NOT LIKE 'pg\\_%' AND p.prokind IN ('f','p') "

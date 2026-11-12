@@ -417,14 +417,16 @@ class QueryEngine:
         """Structure may have changed (CREATE/ALTER/DROP/… or something unclassifiable): drop
         the connection's cached metadata so every user's explorer, diagram and IntelliSense
         see the change on their next read."""
-        from app.services.metadata_cache import metadata_cache  # local: avoid cycle
+        from app.services.metadata_cache import metadata_cache, server_identity  # local: avoid cycle
         from app.services.sql_guard import StatementCategory
 
         if analysis.destructive or any(
             s.category in (StatementCategory.DDL, StatementCategory.UNKNOWN)
             for s in analysis.statements
         ):
-            metadata_cache.invalidate(session.connection_id)
+            metadata_cache.invalidate(
+                session.connection_id, server=server_identity(session.adapter.config)
+            )
 
     async def _abort_script(self, session: LiveSession) -> None:
         """Best-effort hard stop of a cancelled / timed-out script: ask the driver to cancel

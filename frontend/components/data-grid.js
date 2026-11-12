@@ -5,6 +5,7 @@
 import { sortRows, paginate, pageCount } from "./grid-utils.js";
 import { escapeHtml } from "./view-helpers.js";
 import { config } from "../core/config.js";
+import { isDarkTheme, THEME_EVENT } from "../core/theme.js";
 
 const AG_BASE = config.agGridBase;
 
@@ -19,14 +20,25 @@ function loadAgGrid() {
       document.head.appendChild(link);
     }
     const timer = setTimeout(() => reject(new Error("ag-grid timeout")), 8000);
+    // Monaco's AMD loader installs a global `define` (define.amd). AG Grid's UMD bundle sees it
+    // and registers as an anonymous AMD module instead of setting window.agGrid, so whether the
+    // grid loaded used to depend on which library happened to load first. Hide the AMD define
+    // while AG Grid's script evaluates, then put it back.
+    const amdDefine = window.define && window.define.amd ? window.define : null;
+    if (amdDefine) window.define = undefined;
+    const restoreAmd = () => {
+      if (amdDefine && window.define === undefined) window.define = amdDefine;
+    };
     const script = document.createElement("script");
     script.src = `${AG_BASE}/dist/ag-grid-community.min.js`;
     script.onload = () => {
       clearTimeout(timer);
+      restoreAmd();
       window.agGrid?.createGrid ? resolve(window.agGrid) : reject(new Error("ag-grid missing"));
     };
     script.onerror = () => {
       clearTimeout(timer);
+      restoreAmd();
       reject(new Error("ag-grid failed"));
     };
     document.head.appendChild(script);
@@ -35,6 +47,16 @@ function loadAgGrid() {
 }
 
 const PAGE_SIZE = 100;
+
+// AG Grid theme class matching the app theme; every rendered grid follows the toggle live.
+function agThemeClass() {
+  return isDarkTheme() ? "ag-theme-quartz-dark" : "ag-theme-quartz";
+}
+window.addEventListener(THEME_EVENT, () => {
+  document.querySelectorAll("data-grid .ag-host").forEach((host) => {
+    host.className = `ag-host ${agThemeClass()}`;
+  });
+});
 
 export class DataGrid extends HTMLElement {
   connectedCallback() {
@@ -61,6 +83,11 @@ export class DataGrid extends HTMLElement {
     } else {
       overlay?.remove();
     }
+  }
+
+  // <data-grid server-paged>: rows are one server page; the owner renders the pager.
+  get serverPaged() {
+    return this.hasAttribute("server-paged");
   }
 
   setData(columns, rows) {
@@ -91,7 +118,7 @@ export class DataGrid extends HTMLElement {
       const agGrid = await loadAgGrid();
       this.innerHTML = "";
       const host = document.createElement("div");
-      host.className = "ag-theme-quartz-dark";
+      host.className = `ag-host ${agThemeClass()}`;
       host.style.cssText = "width:100%;height:100%;min-height:300px";
       this.appendChild(host);
       const columnDefs = this._columns.map((c, i) => ({
@@ -110,7 +137,7 @@ export class DataGrid extends HTMLElement {
       this._grid = agGrid.createGrid(host, {
         columnDefs,
         rowData,
-        pagination: true,
+        pagination: !this.serverPaged,
         paginationPageSize: PAGE_SIZE,
         defaultColDef: { minWidth: 90, flex: 1 },
       });
@@ -123,9 +150,10 @@ export class DataGrid extends HTMLElement {
     const total = this._rows.length;
     let rows = this._rows;
     if (this._sort.index !== null) rows = sortRows(rows, this._sort.index, this._sort.dir);
-    const pages = pageCount(total, PAGE_SIZE);
+    const size = this.serverPaged ? Math.max(total, 1) : PAGE_SIZE;
+    const pages = pageCount(total, size);
     this._page = Math.min(this._page, pages - 1);
-    const pageRows = paginate(rows, this._page, PAGE_SIZE);
+    const pageRows = paginate(rows, this._page, size);
 
     const head = this._columns
       .map((c, i) => {
@@ -152,15 +180,16 @@ export class DataGrid extends HTMLElement {
         </table>
       </div>
       <div class="grid-footer">
-        <span class="muted">${total} row${total === 1 ? "" : "s"}</span>
+        <span class="muted">${total} row${total === 1 ? "" : "s"}${this.serverPaged ? " on this page" : ""}</span>
         <button class="btn btn-ghost" data-wrap title="Wrap long cell text"
           style="margin-left:8px">${this._wrap ? "↩ Wrap: on" : "↩ Wrap: off"}</button>
         <span class="spacer"></span>
+        ${this.serverPaged ? "" : `
         <button class="btn btn-ghost" data-nav="prev" ${this._page === 0 ? "disabled" : ""}>‹</button>
         <span class="muted">Page ${this._page + 1} / ${pages}</span>
         <button class="btn btn-ghost" data-nav="next" ${
           this._page >= pages - 1 ? "disabled" : ""
-        }>›</button>
+        }>›</button>`}
       </div>`;
     this.querySelector("[data-wrap]")?.addEventListener("click", () => {
       this._wrap = !this._wrap;

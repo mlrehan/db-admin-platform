@@ -421,7 +421,6 @@ export class EditorView extends HTMLElement {
 
     const failures = stmts.filter((s) => !s.success);
     const failed = failures[0];
-    const okCount = stmts.filter((s) => s.success).length;
     if (failed) {
       // Errors already carry their location (e.g. "Batch 6 (line 21): Msg 137: …").
       const more = failures.length > 1 ? ` <span class="muted">(+${failures.length - 1} more — see Messages)</span>` : "";
@@ -441,7 +440,9 @@ export class EditorView extends HTMLElement {
       const rowInfo = resultSets.length
         ? ` · ${resultSets.length} result set${resultSets.length === 1 ? "" : "s"}, ${totalRows} row${totalRows === 1 ? "" : "s"}`
         : "";
-      this._status.innerHTML = `<span style="color:var(--success)">✓ ${okCount} statement${okCount === 1 ? "" : "s"} in ${ms} ms${rowInfo}</span>`;
+      // The response lists result sets and messages (not statements), so don't present its
+      // length as a statement count — "2 statements" for a 3-statement script misled users.
+      this._status.innerHTML = `<span style="color:var(--success)">✓ Completed in ${ms} ms${rowInfo}</span>`;
       this._selectTab(resultSets.length ? "results" : "messages");
     }
   }

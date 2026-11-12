@@ -108,7 +108,12 @@ export class SessionBar extends HTMLElement {
     );
     this.querySelector(".newdb-btn").addEventListener("click", () => this._createDatabase());
     this.querySelector(".open-btn").addEventListener("click", () => this._open());
-    this.querySelector(".refresh-btn").addEventListener("click", () => this.refresh());
+    // An explicit refresh must show the truth: drop the short client-side metadata cache so a
+    // database created/dropped elsewhere (another connection, another user) appears at once.
+    this.querySelector(".refresh-btn").addEventListener("click", () => {
+      clearMetadataCache();
+      this.refresh();
+    });
 
     // Auto-select the first session if none active.
     const current = sessionStore.getState().sessionId || (sessions[0] && sessions[0].id);

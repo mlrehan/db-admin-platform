@@ -13,6 +13,8 @@
 //
 // The Monaco binding (components/sql-completion.js) maps these plain items to Monaco items.
 
+import { builtinFunctions, functionSnippet } from "./sql-functions.js";
+
 // --- dialect vocabulary --------------------------------------------------------------------
 
 const COMMON_KEYWORDS = [
@@ -54,46 +56,6 @@ const DIALECT_KEYWORDS = {
     "INSERT OR IGNORE", "BEGIN", "BEGIN TRANSACTION", "SAVEPOINT", "RELEASE", "ATTACH DATABASE",
     "VACUUM", "INTEGER", "TEXT", "REAL", "BLOB", "NUMERIC",
   ],
-};
-
-// name → snippet body ("$0" is the cursor). Only functions a dialect actually supports.
-const COMMON_FUNCTIONS = {
-  COUNT: "COUNT(${1:*})", SUM: "SUM(${1})", AVG: "AVG(${1})", MIN: "MIN(${1})", MAX: "MAX(${1})",
-  COALESCE: "COALESCE(${1}, ${2})", NULLIF: "NULLIF(${1}, ${2})", CAST: "CAST(${1} AS ${2})",
-  UPPER: "UPPER(${1})", LOWER: "LOWER(${1})", ABS: "ABS(${1})", ROUND: "ROUND(${1}, ${2:0})",
-  ROW_NUMBER: "ROW_NUMBER() OVER (ORDER BY ${1})", RANK: "RANK() OVER (ORDER BY ${1})",
-  DENSE_RANK: "DENSE_RANK() OVER (ORDER BY ${1})", LAG: "LAG(${1}) OVER (ORDER BY ${2})",
-  LEAD: "LEAD(${1}) OVER (ORDER BY ${2})", REPLACE: "REPLACE(${1}, ${2}, ${3})",
-};
-const DIALECT_FUNCTIONS = {
-  mssql: {
-    GETDATE: "GETDATE()", SYSDATETIME: "SYSDATETIME()", ISNULL: "ISNULL(${1}, ${2})",
-    LEN: "LEN(${1})", DATEADD: "DATEADD(${1:day}, ${2}, ${3})", DATEDIFF: "DATEDIFF(${1:day}, ${2}, ${3})",
-    CONVERT: "CONVERT(${1}, ${2})", TRY_CONVERT: "TRY_CONVERT(${1}, ${2})", FORMAT: "FORMAT(${1}, ${2})",
-    STRING_AGG: "STRING_AGG(${1}, ${2:','})", CONCAT: "CONCAT(${1}, ${2})", NEWID: "NEWID()",
-    SUBSTRING: "SUBSTRING(${1}, ${2}, ${3})", CHARINDEX: "CHARINDEX(${1}, ${2})", IIF: "IIF(${1}, ${2}, ${3})",
-    SCOPE_IDENTITY: "SCOPE_IDENTITY()", OBJECT_ID: "OBJECT_ID(${1})", DB_NAME: "DB_NAME()",
-  },
-  postgresql: {
-    NOW: "NOW()", CURRENT_DATE: "CURRENT_DATE", DATE_TRUNC: "DATE_TRUNC('${1:day}', ${2})",
-    LENGTH: "LENGTH(${1})", SUBSTRING: "SUBSTRING(${1} FROM ${2} FOR ${3})", CONCAT: "CONCAT(${1}, ${2})",
-    STRING_AGG: "STRING_AGG(${1}, ${2:','})", ARRAY_AGG: "ARRAY_AGG(${1})", TO_CHAR: "TO_CHAR(${1}, '${2}')",
-    EXTRACT: "EXTRACT(${1:YEAR} FROM ${2})", GEN_RANDOM_UUID: "GEN_RANDOM_UUID()",
-    JSONB_BUILD_OBJECT: "JSONB_BUILD_OBJECT(${1})", GREATEST: "GREATEST(${1}, ${2})",
-  },
-  mysql: {
-    NOW: "NOW()", CURDATE: "CURDATE()", IFNULL: "IFNULL(${1}, ${2})", LENGTH: "LENGTH(${1})",
-    CONCAT: "CONCAT(${1}, ${2})", GROUP_CONCAT: "GROUP_CONCAT(${1})", DATE_FORMAT: "DATE_FORMAT(${1}, '${2}')",
-    DATE_ADD: "DATE_ADD(${1}, INTERVAL ${2} ${3:DAY})", DATEDIFF: "DATEDIFF(${1}, ${2})",
-    SUBSTRING: "SUBSTRING(${1}, ${2}, ${3})", UUID: "UUID()", LAST_INSERT_ID: "LAST_INSERT_ID()",
-    JSON_EXTRACT: "JSON_EXTRACT(${1}, '${2}')", IF: "IF(${1}, ${2}, ${3})",
-  },
-  sqlite: {
-    DATETIME: "DATETIME('now')", DATE: "DATE(${1:'now'})", IFNULL: "IFNULL(${1}, ${2})",
-    LENGTH: "LENGTH(${1})", SUBSTR: "SUBSTR(${1}, ${2}, ${3})", GROUP_CONCAT: "GROUP_CONCAT(${1})",
-    STRFTIME: "STRFTIME('${1}', ${2})", INSTR: "INSTR(${1}, ${2})", TYPEOF: "TYPEOF(${1})",
-    JSON_EXTRACT: "JSON_EXTRACT(${1}, '${2}')", LAST_INSERT_ROWID: "LAST_INSERT_ROWID()",
-  },
 };
 
 // Words that can never be a table alias (so "FROM t WHERE" doesn't treat WHERE as an alias).
@@ -338,7 +300,12 @@ export function analyzeContext(text, offset, dialect = "postgresql") {
     qualifier.unshift(before[k - 1].value);
     k -= 2;
   }
-  if (qualifier.length) return { kind: "member", prefix, qualifier, tables, quoted };
+  if (qualifier.length) {
+    // EXEC dbo.| / CALL app.| → only routines belong there (you can't EXEC a table).
+    const lead = before[k];
+    const routineOnly = !!lead && lead.type === "ident" && !lead.quoted && ROUTINE_KWS.has(lead.lower);
+    return { kind: "member", prefix, qualifier, tables, quoted, routineOnly };
+  }
 
   // Walk back to the governing clause keyword (skipping balanced parentheses).
   let depth = 0;
@@ -537,8 +504,10 @@ export function suggest(analysis, index, dialect) {
   const routines = (rank, schema) => {
     const list = schema != null ? index.routinesBySchema.get(schema) || [] : index.routines;
     for (const r of list) {
+      const args = Array.isArray(r.params) ? `(${r.params.join(", ")})` : "";
       push({ label: r.name, kind: "routine", insertText: ident(r.name, dialect, quoted),
-        detail: `${r.kind === "procedure" ? "Stored procedure" : "Function"}${r.schema_name ? ` · ${r.schema_name}` : ""}` }, rank);
+        detail: `${r.kind === "procedure" ? "Stored procedure" : "Function"}${r.schema_name ? ` · ${r.schema_name}` : ""}${args ? ` ${args}` : ""}${r.returns ? ` → ${r.returns}` : ""}`,
+        routine: r }, rank);
     }
   };
   const schemas = (rank) => {
@@ -552,9 +521,11 @@ export function suggest(analysis, index, dialect) {
     }
   };
   const functions = (rank) => {
-    const fns = { ...COMMON_FUNCTIONS, ...(DIALECT_FUNCTIONS[dialect] || {}) };
-    for (const [name, body] of Object.entries(fns)) {
-      push({ label: name, kind: "function", insertText: body, snippet: true, detail: "Function" }, rank);
+    // Full built-in catalog for the dialect (core/sql-functions.js): the item inserts named
+    // placeholders for the required parameters and carries every overload for the docs panel.
+    for (const [name, sigs] of builtinFunctions(dialect)) {
+      push({ label: name, kind: "function", insertText: functionSnippet(sigs[0]), snippet: true,
+        detail: sigs[0].label, signatures: sigs }, rank);
     }
   };
   const inScope = () =>
@@ -568,6 +539,8 @@ export function suggest(analysis, index, dialect) {
       if (target.type === "columns") {
         push({ label: "*", kind: "column", insertText: "*", detail: `All columns of ${target.object.name}` }, 0);
         columnsOf(target.object, 1);
+      } else if (target.type === "objects" && analysis.routineOnly) {
+        routines(0, target.schema);
       } else if (target.type === "objects") {
         for (const o of index.bySchema.get(target.schema) || []) {
           push({ label: o.name, kind: o.kind === "view" ? "view" : "table", insertText: ident(o.name, dialect, quoted),

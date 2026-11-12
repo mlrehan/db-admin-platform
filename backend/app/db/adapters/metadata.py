@@ -100,6 +100,10 @@ class CatalogRoutine:
     schema: str | None
     name: str
     kind: str  # "procedure" | "function"
+    # Parameter labels in order, e.g. ("@CustomerId int", "@Total money OUTPUT"); None when the
+    # engine/permissions don't expose them (IntelliSense then shows the name only).
+    params: tuple[str, ...] | None = None
+    returns: str | None = None
 
 
 @dataclass(frozen=True)

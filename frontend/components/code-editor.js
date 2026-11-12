@@ -4,6 +4,7 @@
 // also the fallback if Monaco fails to load. Exposes getValue()/setValue()/focus().
 
 import { config } from "../core/config.js";
+import { isDarkTheme, THEME_EVENT } from "../core/theme.js";
 import { registerSqlCompletion } from "./sql-completion.js";
 
 const MONACO_BASE = config.monacoBase;
@@ -40,8 +41,49 @@ function loadMonaco() {
   return window.__monacoPromise;
 }
 
+// Monaco's built-in themes matching the app theme. Monaco themes are global (one per page),
+// so a single listener re-themes every open editor when the user toggles light/dark.
+function monacoThemeName() {
+  return isDarkTheme() ? "vs-dark" : "vs";
+}
+
+// Show the documentation panel next to the suggestion list by default (signature, return type,
+// parameters — SSMS-style) instead of Monaco's collapsed default. Monaco has no public option
+// for this, so its widget is used defensively: if the internals ever change, the editor simply
+// keeps Monaco's default (users can always toggle with Ctrl+Space).
+function expandSuggestionDocs(ed) {
+  try {
+    const widget = ed.getContribution("editor.contrib.suggestController")?.widget?.value;
+    if (!widget || typeof widget.onDidShow !== "function" || typeof widget._isDetailsVisible !== "function") return;
+    let applied = false;
+    widget.onDidShow(() => {
+      if (applied) return;
+      applied = true; // once per page: Monaco remembers the state, and the user's toggles win
+      // Run the same action as Ctrl+Space AFTER Monaco finishes laying out the list (changing
+      // it inside the show event collapses the widget).
+      setTimeout(() => {
+        if (!widget._isDetailsVisible()) ed.trigger("app", "toggleSuggestionDetails", {});
+      }, 0);
+    });
+  } catch {
+    /* keep Monaco's default */
+  }
+}
+
+let followingAppTheme = false;
+function followAppTheme(monaco) {
+  if (followingAppTheme) return;
+  followingAppTheme = true;
+  window.addEventListener(THEME_EVENT, () => monaco.editor.setTheme(monacoThemeName()));
+}
+
 export class CodeEditor extends HTMLElement {
   connectedCallback() {
+    if (this._textarea) {
+      // Re-attached (moved in the DOM): rebuild Monaco from the kept text.
+      if (!prefersPlainTextarea()) this._tryMonaco();
+      return;
+    }
     this._value = this.getAttribute("value") || "";
     this.classList.add("code-editor");
     this._textarea = document.createElement("textarea");
@@ -79,10 +121,33 @@ export class CodeEditor extends HTMLElement {
     }
   }
 
+  // Monaco editors are registered globally and are never garbage-collected on their own: without
+  // this, every visit to the SQL Editor leaked an editor + model (and a detached instance could
+  // still hold keyboard focus). Keep the text in the fallback textarea, then dispose.
+  disconnectedCallback() {
+    const ed = this._monaco;
+    if (!ed) return;
+    this._monaco = null;
+    const text = ed.getValue();
+    this._value = text;
+    if (this._textarea) {
+      this._textarea.value = text;
+      this._textarea.classList.remove("hidden");
+    }
+    const model = ed.getModel();
+    const host = ed.getContainerDomNode();
+    ed.dispose();
+    model?.dispose();
+    host?.remove();
+  }
+
   async _tryMonaco() {
     try {
       const monaco = await loadMonaco();
+      // Removed (or already upgraded) while Monaco was loading: don't create an orphan editor.
+      if (!this.isConnected || this._monaco) return;
       registerSqlCompletion(monaco); // schema-aware IntelliSense (once per page)
+      followAppTheme(monaco); // light/dark follows the app theme toggle (once per page)
       const host = document.createElement("div");
       host.className = "monaco-host";
       this.appendChild(host);
@@ -91,7 +156,7 @@ export class CodeEditor extends HTMLElement {
       this._monaco = monaco.editor.create(host, {
         value: this._textarea.value || this._value,
         language: "sql",
-        theme: "vs-dark",
+        theme: monacoThemeName(),
         minimap: { enabled: false },
         fontSize: 13,
         fontFamily: "var(--font-mono)",
@@ -115,6 +180,7 @@ export class CodeEditor extends HTMLElement {
         () => this.dispatchEvent(new CustomEvent("run", { bubbles: true }))
       );
       this._monaco.onDidChangeModelContent(() => this._emitChange());
+      expandSuggestionDocs(this._monaco);
     } catch {
       // Fallback textarea stays; nothing to do.
     }

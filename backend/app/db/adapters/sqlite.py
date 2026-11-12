@@ -95,6 +95,7 @@ class SQLiteAdapter(SQLAlchemyAdapter):
         "ORDER BY m.name, p.cid"
     )
     catalog_routines_sql = None
+    catalog_routine_params_sql = None
 
     # --- files / engines -----------------------------------------------------------------
 

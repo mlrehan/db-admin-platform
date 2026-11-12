@@ -11,7 +11,11 @@ const ENGINES = [
   { value: "postgresql", label: "PostgreSQL", port: 5432 },
   { value: "mysql", label: "MySQL", port: 3306 },
   { value: "mssql", label: "SQL Server", port: 1433 },
+  // SQLite databases are files in the server's data directory: no host, port or login.
+  { value: "sqlite", label: "SQLite (database files on the server)", port: 0, fileBased: true },
 ];
+
+const isFileBased = (engine) => !!ENGINES.find((e) => e.value === engine)?.fileBased;
 
 export class ConnectionsView extends HTMLElement {
   async connectedCallback() {
@@ -80,7 +84,7 @@ export class ConnectionsView extends HTMLElement {
     return `<tr>
       <td data-label="Name"><strong>${escapeHtml(c.name)}</strong>${mine ? "" : ' <span class="badge">shared</span>'}</td>
       <td data-label="Engine"><span class="badge">${escapeHtml(c.engine)}</span></td>
-      <td data-label="Host" class="mono">${escapeHtml(c.host)}:${c.port}</td>
+      <td data-label="Host" class="mono">${isFileBased(c.engine) ? '<span class="badge">server files</span>' : `${escapeHtml(c.host)}:${c.port}`}</td>
       <td data-label="Database" class="mono">${c.database ? escapeHtml(c.database) : '<span class="badge">all databases</span>'}</td>
       <td data-label="Actions" class="conn-actions">${ownerActions}</td></tr>`;
   }
@@ -88,7 +92,10 @@ export class ConnectionsView extends HTMLElement {
   async _action(action, conn) {
     if (!conn) return;
     if (action === "test") {
-      const done = await loading("Testing connection…", `Reaching ${conn.host}:${conn.port}`);
+      const done = await loading(
+        "Testing connection…",
+        isFileBased(conn.engine) ? "Opening the SQLite data directory" : `Reaching ${conn.host}:${conn.port}`
+      );
       try {
         const r = await app.api.testConnection(conn.id);
         done();
@@ -145,7 +152,12 @@ export class ConnectionsView extends HTMLElement {
               `<option value="${e.value}" ${existing?.engine === e.value ? "selected" : ""}>${e.label}</option>`
           ).join("")}
         </select></div>
-      <div class="row">
+      <p class="sqlite-only muted" style="font-size:12.5px; margin:0 0 12px; line-height:1.5">
+        SQLite databases are files stored on the server. Leave <strong>Database</strong> blank to
+        browse and create database files from the editor's <strong>+ Database</strong> button, or
+        enter an existing file name such as <span class="mono">sales.db</span>.
+      </p>
+      <div class="row network-only">
         <div class="field" style="flex:2"><label>Host</label>
           <input class="input" name="host" required value="${escapeHtml(existing?.host ?? "localhost")}"></div>
         <div class="field" style="flex:1"><label>Port</label>
@@ -154,11 +166,11 @@ export class ConnectionsView extends HTMLElement {
       <div class="field"><label>Database <span class="muted">(optional — leave blank for server-level access to all databases)</span></label>
         <input class="input" name="database" placeholder="Leave blank to browse all databases"
           value="${escapeHtml(existing?.database ?? "")}"></div>
-      <div class="field"><label>Username</label>
+      <div class="field network-only"><label>Username</label>
         <input class="input" name="username" required value="${escapeHtml(existing?.username ?? "")}"></div>
-      <div class="field"><label>Password ${existing ? "(leave blank to keep)" : ""}</label>
+      <div class="field network-only"><label>Password ${existing ? "(leave blank to keep)" : ""}</label>
         <input class="input" name="password" type="password" ${existing ? "" : "required"}></div>
-      <div class="field"><label>SSL mode (optional)</label>
+      <div class="field network-only"><label>SSL mode (optional)</label>
         <input class="input" name="ssl_mode" placeholder="disable | require | verify-full"
           value="${escapeHtml(existing?.ssl_mode ?? "")}"></div>
       <div class="row" style="justify-content:flex-end; margin-top:8px">
@@ -166,10 +178,24 @@ export class ConnectionsView extends HTMLElement {
       </div>`;
 
     const engineSel = form.querySelector('[name="engine"]');
+    // Show host/port/credentials only for network engines; SQLite needs just a name.
+    const syncEngineFields = () => {
+      const fileBased = isFileBased(engineSel.value);
+      form.querySelectorAll(".network-only").forEach((el) => el.classList.toggle("hidden", fileBased));
+      form.querySelectorAll(".sqlite-only").forEach((el) => el.classList.toggle("hidden", !fileBased));
+      form.querySelector('[name="host"]').required = !fileBased;
+      form.querySelector('[name="username"]').required = !fileBased;
+      form.querySelector('[name="password"]').required = !fileBased && !existing;
+      form.querySelector('[name="database"]').placeholder = fileBased
+        ? "e.g. sales.db — or leave blank to browse/create files"
+        : "Leave blank to browse all databases";
+    };
     engineSel.addEventListener("change", () => {
       const e = ENGINES.find((x) => x.value === engineSel.value);
-      if (e) form.querySelector('[name="port"]').value = e.port;
+      if (e && !e.fileBased) form.querySelector('[name="port"]').value = e.port;
+      syncEngineFields();
     });
+    syncEngineFields();
 
     const close = openModal({
       title: existing ? "Edit connection" : "New connection",
@@ -180,6 +206,21 @@ export class ConnectionsView extends HTMLElement {
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const data = Object.fromEntries(new FormData(form).entries());
+      const engine = existing?.engine ?? data.engine;
+      if (isFileBased(engine)) {
+        // SQLite: only a name and (optionally) a database file name.
+        const payload = { name: data.name, database: data.database.trim() || null };
+        try {
+          if (existing) await app.api.updateConnection(existing.id, payload);
+          else await app.api.createConnection({ ...payload, engine });
+          bus.emit(Events.TOAST, { message: "Saved", kind: "success" });
+          close();
+          await this._load();
+        } catch (err) {
+          bus.emit(Events.TOAST, { message: err.message, kind: "error" });
+        }
+        return;
+      }
       const payload = {
         name: data.name,
         host: data.host,

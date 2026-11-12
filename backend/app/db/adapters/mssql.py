@@ -55,6 +55,12 @@ class MSSQLAdapter(SQLAlchemyAdapter):
     # USE <db> works on an open connection; scripts' USE is followed by the session.
     current_database_sql = "SELECT DB_NAME()"
     supports_use_statement = True
+
+    @staticmethod
+    def _param_label(name: str, type_label: str, mode: str) -> str:
+        # T-SQL convention: output parameters are written "@name type OUTPUT".
+        suffix = " OUTPUT" if mode in ("OUT", "INOUT") else ""
+        return f"{name} {type_label}{suffix}".strip()
     transaction_probe_sql = "SELECT @@TRANCOUNT"
     databases_sql = "SELECT name FROM sys.databases"
     routine_definition_sql = "SELECT OBJECT_DEFINITION(OBJECT_ID(:name))"

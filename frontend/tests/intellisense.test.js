@@ -148,3 +148,10 @@ test("large catalogs stay responsive: 20k tables, capped + incomplete, < 50 ms",
   assert.ok(res.items.every((i) => i.label.startsWith("T1")));
   assert.ok(median < 50, `median ${median.toFixed(1)} ms (all: ${times.map((t) => t.toFixed(0)).join(",")})`);
 });
+
+test("EXEC schema. lists only routines (not tables)", () => {
+  const got = labels("EXEC dbo.|");
+  assert.ok(got.includes("usp_rooms") && got.includes("fn_label"), got.join(","));
+  assert.ok(!got.includes("Tutor"), "tables are not executable");
+  assert.ok(labels("SELECT * FROM dbo.|").includes("Tutor"), "FROM dbo. still lists tables");
+});

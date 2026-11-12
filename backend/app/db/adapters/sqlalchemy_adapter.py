@@ -59,6 +59,30 @@ from app.db.adapters.metadata import (
 
 logger = get_logger(__name__)
 
+
+def split_argument_list(text: Any) -> tuple[str, ...]:
+    """Split an argument list such as ``a integer, b numeric(10,2) DEFAULT 0`` on top-level
+    commas (PostgreSQL's pg_get_function_arguments) into one label per parameter."""
+    s = str(text or "").strip()
+    if not s:
+        return ()
+    parts: list[str] = []
+    depth = 0
+    quote = False
+    start = 0
+    for i, ch in enumerate(s):
+        if ch == "'":
+            quote = not quote
+        elif not quote and ch == "(":
+            depth += 1
+        elif not quote and ch == ")":
+            depth -= 1
+        elif not quote and depth == 0 and ch == ",":
+            parts.append(s[start:i].strip())
+            start = i + 1
+    parts.append(s[start:].strip())
+    return tuple(p for p in parts if p)
+
 _POOL_RECYCLE_SECONDS = 1800
 
 # A conservative database-name policy: starts with a letter/underscore, then letters, digits,
@@ -1011,6 +1035,13 @@ class SQLAlchemyAdapter(DatabaseAdapter):
         "SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES "
         "ORDER BY ROUTINE_SCHEMA, ROUTINE_NAME"
     )
+    # Routine parameters for IntelliSense parameter hints: (schema, routine, ordinal, mode,
+    # name, data_type, char_len, precision, scale). Ordinal 0 is a function's return value.
+    catalog_routine_params_sql: ClassVar[str | None] = (
+        "SELECT SPECIFIC_SCHEMA, SPECIFIC_NAME, ORDINAL_POSITION, PARAMETER_MODE, PARAMETER_NAME, "
+        "DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE "
+        "FROM INFORMATION_SCHEMA.PARAMETERS ORDER BY SPECIFIC_SCHEMA, SPECIFIC_NAME, ORDINAL_POSITION"
+    )
     # Safety cap for enormous databases (the editor still works; the result is flagged).
     catalog_max_columns: ClassVar[int] = 150_000
 
@@ -1042,6 +1073,9 @@ class SQLAlchemyAdapter(DatabaseAdapter):
                 if self.catalog_routines_sql
                 else []
             )
+            param_map = (
+                await self._routine_params(conn) if routine_rows and self.catalog_routine_params_sql else {}
+            )
         truncated = len(rows) > self.catalog_max_columns
         objects: list[CatalogObject] = []
         current_key: tuple[Any, Any] | None = None
@@ -1070,16 +1104,55 @@ class SQLAlchemyAdapter(DatabaseAdapter):
                 )
             )
         flush()
-        routines = tuple(
-            CatalogRoutine(
-                schema=(str(r[0]) if r[0] is not None else None),
-                name=str(r[1]),
-                kind="procedure" if "PROC" in str(r[2] or "").upper() else "function",
-            )
-            for r in routine_rows
-        )
+        routines = tuple(self._catalog_routine(r, param_map) for r in routine_rows)
         return Catalog(default_schema=default_schema, objects=tuple(objects),
                        routines=routines, truncated=truncated)
+
+    def _catalog_routine(
+        self, row: Any, param_map: dict[tuple[str, str], tuple[list[str], str | None]]
+    ) -> CatalogRoutine:
+        schema = str(row[0]) if row[0] is not None else None
+        name = str(row[1])
+        kind = "procedure" if "PROC" in str(row[2] or "").upper() else "function"
+        if len(row) >= 5:  # engines that return the argument list inline (PostgreSQL)
+            return CatalogRoutine(schema=schema, name=name, kind=kind,
+                                  params=split_argument_list(row[3]),
+                                  returns=(str(row[4]) if row[4] and kind == "function" else None))
+        found = param_map.get(((schema or "").lower(), name.lower()))
+        if found is None:
+            # Parameters known for this database but none listed → the routine takes none.
+            return CatalogRoutine(schema=schema, name=name, kind=kind,
+                                  params=() if param_map else None)
+        params, returns = found
+        return CatalogRoutine(schema=schema, name=name, kind=kind, params=tuple(params),
+                              returns=returns if kind == "function" else None)
+
+    async def _routine_params(
+        self, conn: AsyncConnection
+    ) -> dict[tuple[str, str], tuple[list[str], str | None]]:
+        """Parameter labels per routine. Best effort: a failure (permissions, old server)
+        only means parameter hints show the routine name without its arguments."""
+        try:
+            rows = (await conn.execute(text(self.catalog_routine_params_sql or ""))).fetchall()
+        except Exception:  # noqa: BLE001
+            logger.info("Routine parameters unavailable for IntelliSense", exc_info=True)
+            return {}
+        out: dict[tuple[str, str], tuple[list[str], str | None]] = {}
+        for schema, routine, ordinal, mode, pname, dtype, clen, prec, scale in rows:
+            key = (str(schema or "").lower(), str(routine).lower())
+            params, returns = out.setdefault(key, ([], None))
+            type_label = self._type_label(dtype, clen, prec, scale)
+            if not ordinal or not pname:  # ordinal 0 / unnamed: the function's return value
+                out[key] = (params, type_label or returns)
+                continue
+            params.append(self._param_label(str(pname), type_label, str(mode or "").upper()))
+        return out
+
+    @staticmethod
+    def _param_label(name: str, type_label: str, mode: str) -> str:
+        if mode in ("OUT", "INOUT"):
+            return f"{mode} {name} {type_label}".strip()
+        return f"{name} {type_label}".strip()
 
     # --- relationship graph (database diagram) ----------------------------------------------
 
