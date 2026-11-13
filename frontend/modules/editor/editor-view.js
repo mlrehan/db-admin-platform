@@ -22,7 +22,7 @@ function newQueryId() {
 import { escapeHtml } from "../../components/view-helpers.js";
 import "../../components/session-bar.js";
 import "../../components/code-editor.js";
-import "../../components/data-grid.js";
+import { preloadDataGrid } from "../../components/data-grid.js";
 
 // Guard against accidentally loading a huge dump into the in-browser editor.
 const MAX_SQL_FILE_BYTES = 8 * 1024 * 1024; // 8 MB
@@ -85,6 +85,7 @@ export class EditorView extends HTMLElement {
     this.addEventListener("editor-change", () => this._saveDraft());
 
     this._runBtn.addEventListener("click", () => (this._running ? this._cancel() : this._run()));
+    preloadDataGrid(); // the first result renders with the full grid, not a fallback
     // Warm the IntelliSense catalog for the active session/database (and on every switch), so
     // the first suggestion list already contains the tables.
     const prefetch = () => {
@@ -173,6 +174,7 @@ export class EditorView extends HTMLElement {
   }
 
   disconnectedCallback() {
+    clearInterval(this._elapsedTimer);
     // Flush any pending draft immediately when leaving the editor.
     clearTimeout(this._draftTimer);
     this._writeDraft();
@@ -252,12 +254,36 @@ export class EditorView extends HTMLElement {
   }
 
   // Show/clear a centered busy overlay while a script runs (the single grid used to own this).
+  // Running state: a centered card in the results pane and a chip in the status bar, both with
+  // a live elapsed timer.
   _setBusy(on, text = "Executing…") {
-    if (on) {
-      this._results.innerHTML =
-        `<div class="grid-busy" style="position:static;flex:1">` +
-        `<div class="spinner"></div><div class="muted">${escapeHtml(text)}</div></div>`;
-    }
+    clearInterval(this._elapsedTimer);
+    if (!on) return;
+    const started = performance.now();
+    this._results.innerHTML =
+      `<div class="results-state" role="status" aria-live="polite"><div class="spinner"></div>` +
+      `<h4>${escapeHtml(text)}</h4><span data-elapsed>0.0 s</span></div>`;
+    this._status.innerHTML =
+      `<span class="rs-chip run"><span class="spinner sm"></span> ${escapeHtml(text)}</span>` +
+      `<span class="rs-metrics"><span class="rs-metric" data-elapsed>0.0 s</span></span>`;
+    const tick = () => {
+      const secs = ((performance.now() - started) / 1000).toFixed(1);
+      this.querySelectorAll("[data-elapsed]").forEach((el) => (el.textContent = `${secs} s`));
+    };
+    this._elapsedTimer = setInterval(tick, 100);
+  }
+
+  _statusTime() {
+    return `<span class="rs-time">${escapeHtml(new Date().toLocaleTimeString())}</span>`;
+  }
+
+  // Centered state card for the results pane (empty / error).
+  _stateHtml(kind, title, detail = "") {
+    const icon = kind === "error" ? "✕" : kind === "ok" ? "✓" : "○";
+    const body = kind === "error" && detail
+      ? `<pre>${escapeHtml(detail)}</pre>`
+      : detail ? `<span>${escapeHtml(detail)}</span>` : "";
+    return `<div class="results-state ${kind}"><div class="rs-icon">${icon}</div><h4>${escapeHtml(title)}</h4>${body}</div>`;
   }
 
   // A row-resize handle placed between two stacked result-set grids. Dragging it grows/shrinks
@@ -315,7 +341,6 @@ export class EditorView extends HTMLElement {
     this._runBtn.classList.add("btn-danger");
     this._runBtn.innerHTML = `<span class="spinner sm"></span> Cancel`;
     this._runBtn.title = "Cancel the running query";
-    this._status.innerHTML = `<span class="muted">Executing${selected ? " selection" : ""}…</span>`;
     this._selectTab("results");
     this._setBusy(true, `Executing${selected ? " selection" : ""}…`);
     const start = performance.now();
@@ -336,9 +361,12 @@ export class EditorView extends HTMLElement {
       }
       this._showTransactionState(!!res.open_transaction);
     } catch (err) {
-      this._results.innerHTML = `<div class="grid-empty muted">—</div>`;
-      this._status.innerHTML = `<span style="color:var(--danger)">✕ ${escapeHtml(err.message)}</span>`;
+      this._setBusy(false);
+      this._results.innerHTML = this._stateHtml("error", "The request failed", err.message);
+      this._status.innerHTML =
+        `<span class="rs-chip err">✕ Failed</span><span class="rs-msg">${escapeHtml(err.message)}</span>${this._statusTime()}`;
     } finally {
+      this._setBusy(false);
       this._running = null;
       this._runBtn.disabled = false;
       this._runBtn.classList.remove("btn-danger");
@@ -382,6 +410,7 @@ export class EditorView extends HTMLElement {
   }
 
   _render(res, ms) {
+    this._setBusy(false);
     const stmts = res.statements || [];
     // Render EVERY result set the script produced, stacked like Microsoft SSMS. A single set
     // fills the pane; multiple sets each get a bounded, individually-scrollable block labelled
@@ -396,24 +425,39 @@ export class EditorView extends HTMLElement {
         if (multi) {
           const label = document.createElement("div");
           label.className = "result-label";
+          const cols = (s.columns || []).length;
           label.innerHTML =
             `<strong>Result ${i + 1}</strong>` +
-            `<span class="muted">· ${s.row_count} row${s.row_count === 1 ? "" : "s"}` +
-            `${s.truncated ? " (truncated)" : ""}</span>`;
+            `<span class="rg-chip">${s.row_count.toLocaleString()} row${s.row_count === 1 ? "" : "s"}</span>` +
+            `<span class="rg-chip">${cols} column${cols === 1 ? "" : "s"}</span>` +
+            (s.truncated ? '<span class="rg-chip warn">truncated</span>' : "");
           block.appendChild(label);
         }
         const grid = document.createElement("data-grid");
         block.appendChild(grid);
         this._results.appendChild(block); // connect before setData so it renders
-        grid.setData(s.columns, s.rows);
+        grid.setData(s.columns, s.rows, { truncated: !!s.truncated });
         // A draggable divider between adjacent result sets lets the user resize each grid
         // vertically (SSMS-style), dragging the block above it taller/shorter.
         if (i < resultSets.length - 1) {
           this._results.appendChild(this._makeResultDivider(block));
         }
       });
+    } else if (stmts.some((s) => !s.success)) {
+      const err = stmts.find((s) => !s.success);
+      this._results.innerHTML = this._stateHtml(
+        "error",
+        err.error_code === "QUERY_CANCELLED" ? "Query cancelled" : "Query failed",
+        err.error || err.error_code || "",
+      );
     } else {
-      this._results.innerHTML = `<div class="grid-empty muted">No result set returned.</div>`;
+      // DDL / DML / SET …: no rows to show — summarize what the server reported.
+      const notes = stmts.map((s) => s.sql).filter((t) => t && /row\(s\) affected|completed|changed/i.test(t));
+      this._results.innerHTML = this._stateHtml(
+        "ok",
+        "Commands completed successfully",
+        notes.length ? notes.slice(0, 3).join(" · ") : "The statement did not return a result set.",
+      );
     }
 
     // Messages: server messages, result summaries and errors (SSMS "Messages" tab).
@@ -423,10 +467,13 @@ export class EditorView extends HTMLElement {
     const failed = failures[0];
     if (failed) {
       // Errors already carry their location (e.g. "Batch 6 (line 21): Msg 137: …").
-      const more = failures.length > 1 ? ` <span class="muted">(+${failures.length - 1} more — see Messages)</span>` : "";
+      const more = failures.length > 1 ? `<span class="rg-chip">+${failures.length - 1} more — see Messages</span>` : "";
+      const cancelled = failed.error_code === "QUERY_CANCELLED";
+      const text = escapeHtml(failed.error || failed.error_code);
       this._status.innerHTML =
-        `<span class="badge cat-ddl">${failed.error_code === "QUERY_CANCELLED" ? "cancelled" : "error"}</span> ` +
-        `<span style="color:var(--danger)">✕ ${escapeHtml(failed.error || failed.error_code)}</span>${more}`;
+        `<span class="rs-chip ${cancelled ? "warn" : "err"}">${cancelled ? "■ Cancelled" : "✕ Error"}</span>` +
+        `<span class="rs-msg" title="${text}">${text}</span>${more}` +
+        `<span class="rs-metrics"><span class="rs-metric">${ms.toLocaleString()} ms</span></span>${this._statusTime()}`;
       // If the script still produced result sets before failing, keep them visible (SSMS shows
       // the results plus the error). Otherwise focus the Messages tab.
       this._selectTab(resultSets.length ? "results" : "messages");
@@ -437,12 +484,19 @@ export class EditorView extends HTMLElement {
       }
     } else {
       const totalRows = resultSets.reduce((n, s) => n + s.row_count, 0);
-      const rowInfo = resultSets.length
-        ? ` · ${resultSets.length} result set${resultSets.length === 1 ? "" : "s"}, ${totalRows} row${totalRows === 1 ? "" : "s"}`
-        : "";
+      const truncated = resultSets.some((s) => s.truncated);
       // The response lists result sets and messages (not statements), so don't present its
       // length as a statement count — "2 statements" for a 3-statement script misled users.
-      this._status.innerHTML = `<span style="color:var(--success)">✓ Completed in ${ms} ms${rowInfo}</span>`;
+      const metrics = [`${ms.toLocaleString()} ms`];
+      if (resultSets.length) {
+        metrics.push(`${resultSets.length} result set${resultSets.length === 1 ? "" : "s"}`);
+        metrics.push(`${totalRows.toLocaleString()} row${totalRows === 1 ? "" : "s"}`);
+      }
+      this._status.innerHTML =
+        `<span class="rs-chip ok">✓ Succeeded</span>` +
+        `<span class="rs-metrics">${metrics.map((m) => `<span class="rs-metric">${m}</span>`).join("")}</span>` +
+        (truncated ? '<span class="rs-chip warn" title="Only the first rows were returned">Truncated</span>' : "") +
+        this._statusTime();
       this._selectTab(resultSets.length ? "results" : "messages");
     }
   }

@@ -35,7 +35,7 @@ _can_use = Depends(require_permissions(Permission.CONNECTION_USE))
 def _to_out(result: ExecuteResult) -> QueryResultOut:
     return QueryResultOut(
         query_id=result.query_id,
-        columns=[{"name": c.name, "type": c.type_name} for c in result.columns],
+        columns=[{"name": c.name, "type": c.type_name, "kind": c.kind} for c in result.columns],
         rows=result.rows,
         row_count=result.row_count,
         rows_affected=result.rows_affected,
@@ -81,7 +81,7 @@ def _script_out(result: ScriptResult) -> ScriptResultOut:
                 sql=s.sql,
                 success=s.success,
                 returns_rows=s.returns_rows,
-                columns=[{"name": c.name, "type": c.type_name} for c in s.columns],
+                columns=[{"name": c.name, "type": c.type_name, "kind": c.kind} for c in s.columns],
                 rows=s.rows,
                 row_count=s.row_count,
                 rows_affected=s.rows_affected,

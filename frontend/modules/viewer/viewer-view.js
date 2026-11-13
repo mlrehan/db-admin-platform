@@ -251,7 +251,7 @@ export class ViewerView extends HTMLElement {
         return this._loadPage();
       }
       this._pageRows = res.row_count;
-      this._grid.setData(res.columns, res.rows);
+      this._grid.setData(res.columns, res.rows, { rowOffset: this._offset, truncated: false });
       this._renderPager();
     } catch (err) {
       this._grid.setBusy(false);

@@ -16,8 +16,9 @@ single live session never runs two statements concurrently (isolation).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -41,7 +42,7 @@ from app.services.sql_introspect import SqlOperation
 from app.services.audit_sink import AuditSink, QueryAuditEvent
 from app.services.orchestrator import LiveSession
 from app.services.sql_guard import SqlAnalysis, SqlGuard
-from app.utils.serialization import row_to_list
+from app.utils.serialization import infer_column_kinds, row_to_list
 
 logger = get_logger(__name__)
 
@@ -106,6 +107,13 @@ class ScriptResult:
     open_transaction: bool = False
     execution_ms: float = 0.0
 
+
+
+def _with_kinds(columns: list[QueryColumn], rows: Sequence[Sequence[Any]]) -> list[QueryColumn]:
+    """Attach the value kind of every column, inferred from the driver values (before they are
+    serialized: decimals, big integers and dates all travel as strings)."""
+    kinds = infer_column_kinds(rows, len(columns))
+    return [dataclasses.replace(c, kind=k) if c.kind is None else c for c, k in zip(columns, kinds)]
 
 class QueryEngine:
     def __init__(self, guard: SqlGuard, audit: AuditSink, settings: QuerySettings) -> None:
@@ -269,7 +277,7 @@ class QueryEngine:
         self._invalidate_metadata_if_ddl(session, analysis)
         return ExecuteResult(
             query_id=query_id,
-            columns=result.columns,
+            columns=_with_kinds(result.columns, result.rows),
             rows=[row_to_list(r) for r in result.rows],
             row_count=result.row_count,
             rows_affected=result.rows_affected,
@@ -363,7 +371,8 @@ class QueryEngine:
         for rs in run.result_sets:
             outcomes.append(
                 StatementOutcome(
-                    sql=sql, success=True, returns_rows=True, columns=rs.columns,
+                    sql=sql, success=True, returns_rows=True,
+                    columns=_with_kinds(rs.columns, rs.rows),
                     rows=[row_to_list(r) for r in rs.rows], row_count=len(rs.rows),
                     rows_affected=None, execution_ms=run.execution_ms, truncated=rs.truncated,
                     category=analysis.category.value, destructive=analysis.destructive,
@@ -489,8 +498,10 @@ class QueryEngine:
                     yield {
                         "type": "columns",
                         "query_id": str(query_id),
+                        # Kinds come from the first batch (columns arrive with it).
                         "columns": [
-                            {"name": c.name, "type": c.type_name} for c in batch.columns
+                            {"name": c.name, "type": c.type_name, "kind": c.kind}
+                            for c in _with_kinds(batch.columns, batch.rows)
                         ],
                         "returns_rows": batch.returns_rows,
                     }

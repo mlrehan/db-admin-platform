@@ -17,6 +17,9 @@ class QueryRequest(BaseModel):
 class QueryColumnOut(BaseModel):
     name: str
     type: str | None = None
+    # integer | decimal | float | boolean | date | datetime | time | interval | binary | uuid |
+    # json | text | other — or None when every value was NULL. Drives alignment/sorting/format.
+    kind: str | None = None
 
 
 class QueryResultOut(BaseModel):

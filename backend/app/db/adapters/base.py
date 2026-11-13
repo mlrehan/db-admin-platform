@@ -74,6 +74,9 @@ class ConnectionTestResult:
 class QueryColumn:
     name: str
     type_name: str | None = None
+    # Value kind inferred from the result's driver values (integer, decimal, date, text, …);
+    # set by the query engine before serialization. See app.utils.serialization.
+    kind: str | None = None
 
 
 @dataclass(frozen=True)

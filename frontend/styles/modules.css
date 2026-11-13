@@ -222,6 +222,506 @@ audit-log {
   background: var(--bg-surface);
 }
 
+/* ============================================================================================
+   Results grid (<data-grid>): AG Grid themed with the app's design tokens (light + dark, live),
+   the built-in fallback table with the same look, value styles, footer and pager.
+   ============================================================================================ */
+.rg {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-surface);
+}
+.rg-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+.rg-body .ag-host {
+  flex: 1;
+  width: 100%;
+  min-height: 160px;
+}
+.rg-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.rg-state {
+  padding: var(--sp-5);
+}
+
+.data-grid .ag-theme-quartz,
+.data-grid .ag-theme-quartz-dark {
+  --rg-header-bg: color-mix(in srgb, var(--bg-hover) 65%, var(--bg-surface));
+  --rg-stripe-bg: color-mix(in srgb, var(--bg-hover) 32%, var(--bg-surface));
+  --ag-font-family: var(--font-sans);
+  --ag-font-size: 13px;
+  --ag-foreground-color: var(--text-primary);
+  --ag-data-color: var(--text-primary);
+  --ag-secondary-foreground-color: var(--text-muted);
+  --ag-background-color: var(--bg-surface);
+  --ag-header-background-color: var(--rg-header-bg);
+  --ag-header-foreground-color: var(--text-secondary);
+  --ag-header-cell-hover-background-color: var(--bg-hover);
+  --ag-header-cell-moving-background-color: var(--bg-hover);
+  --ag-odd-row-background-color: var(--rg-stripe-bg);
+  --ag-row-hover-color: color-mix(in srgb, var(--accent) 7%, var(--bg-hover));
+  --ag-selected-row-background-color: var(--accent-soft);
+  --ag-border-color: var(--border);
+  --ag-row-border-color: color-mix(in srgb, var(--border) 65%, transparent);
+  --ag-header-column-separator-display: block;
+  --ag-header-column-separator-color: var(--border);
+  --ag-header-column-separator-height: 45%;
+  --ag-header-column-resize-handle-color: var(--border-strong);
+  --ag-wrapper-border-radius: 0;
+  --ag-borders: none;
+  --ag-active-color: var(--accent);
+  --ag-input-focus-border-color: var(--accent);
+  --ag-range-selection-border-color: var(--accent);
+  --ag-cell-horizontal-padding: 12px;
+  --ag-tooltip-background-color: var(--bg-elevated);
+  --ag-control-panel-background-color: var(--bg-elevated);
+  --ag-popup-shadow: var(--shadow-md);
+  --ag-card-shadow: var(--shadow-md);
+  --ag-icon-size: 14px;
+}
+.data-grid .ag-root-wrapper {
+  border: none;
+}
+.data-grid .ag-header {
+  border-bottom: 1px solid var(--border-strong);
+}
+.data-grid .ag-header-cell-text {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+/* Column kind (int / dec / date / text …) on a quiet second line under the name — informative
+   without widening every column. */
+.data-grid .rg-h .ag-header-cell-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+  overflow: hidden;
+}
+.data-grid .rg-h-num .ag-header-cell-text {
+  align-items: flex-end;
+}
+.data-grid .rg-h .ag-header-cell-text::after,
+.rg-kind {
+  display: block;
+  color: var(--text-muted);
+  font: 500 10px/1.3 var(--font-mono);
+  letter-spacing: 0.02em;
+}
+.data-grid .rg-h.kind-integer .ag-header-cell-text::after { content: "int"; }
+.data-grid .rg-h.kind-decimal .ag-header-cell-text::after { content: "dec"; }
+.data-grid .rg-h.kind-float .ag-header-cell-text::after { content: "float"; }
+.data-grid .rg-h.kind-boolean .ag-header-cell-text::after { content: "bool"; }
+.data-grid .rg-h.kind-date .ag-header-cell-text::after { content: "date"; }
+.data-grid .rg-h.kind-datetime .ag-header-cell-text::after { content: "datetime"; }
+.data-grid .rg-h.kind-time .ag-header-cell-text::after { content: "time"; }
+.data-grid .rg-h.kind-interval .ag-header-cell-text::after { content: "interval"; }
+.data-grid .rg-h.kind-binary .ag-header-cell-text::after { content: "binary"; }
+.data-grid .rg-h.kind-uuid .ag-header-cell-text::after { content: "uuid"; }
+.data-grid .rg-h.kind-json .ag-header-cell-text::after { content: "json"; }
+.data-grid .rg-h.kind-text .ag-header-cell-text::after { content: "text"; }
+.data-grid .rg-h.kind-other .ag-header-cell-text::after { content: "value"; }
+.data-grid .rg-h.kind-none .ag-header-cell-text::after { content: "null"; }
+/* Numbers: right-aligned headers and cells, tabular figures. */
+.data-grid .rg-h-num .ag-header-cell-label {
+  flex-direction: row-reverse;
+}
+.data-grid .ag-cell.rg-num,
+.rg-table td.rg-num,
+.rg-table th.rg-h-num {
+  text-align: right;
+}
+.data-grid .ag-cell.rg-cell,
+.data-grid .ag-cell.rg-rownum {
+  line-height: 30px;
+}
+/* Row numbers (pinned), SSMS-style. */
+.data-grid .ag-cell.rg-rownum,
+.rg-table .rg-rownum {
+  color: var(--text-muted);
+  /* longhands, not the `font` shorthand — it would reset line-height and misalign the numbers */
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-align: right;
+  background: var(--rg-header-bg, var(--bg-hover));
+}
+.data-grid .ag-header-cell.rg-rownum-h .ag-header-cell-text {
+  color: var(--text-muted);
+}
+.data-grid .ag-pinned-left-cols-container .ag-row,
+.data-grid .ag-pinned-left-header {
+  border-right: 1px solid var(--border);
+}
+.data-grid .ag-overlay-no-rows-wrapper {
+  padding-top: 24px;
+}
+
+/* Cell values — identical in both renderers. */
+.cell-null {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  font: 600 10.5px/17px var(--font-mono);
+  letter-spacing: 0.06em;
+  vertical-align: 1px;
+}
+.cell-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 12px;
+}
+.cell-num {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.cell-special {
+  color: var(--warning);
+}
+.cell-bool {
+  font: 600 12px var(--font-mono);
+}
+.cell-bool.is-true {
+  color: var(--success);
+}
+.cell-bool.is-false {
+  color: var(--text-secondary);
+}
+.cell-date,
+.cell-mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.cell-binary {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--info);
+}
+.cell-json {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Built-in fallback table (same look as the AG Grid renderer). */
+.rg-table {
+  --rg-header-bg: color-mix(in srgb, var(--bg-hover) 65%, var(--bg-surface));
+  --rg-stripe-bg: color-mix(in srgb, var(--bg-hover) 32%, var(--bg-surface));
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  width: max-content;
+  min-width: 100%;
+  font-size: 13px;
+}
+.rg-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 46px;
+  line-height: 1.25;
+  padding: 0 12px;
+  background: var(--rg-header-bg);
+  border-bottom: 1px solid var(--border-strong);
+  border-right: 1px solid var(--border);
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  user-select: none;
+}
+.rg-table thead th:hover {
+  background: var(--bg-hover);
+}
+.rg-table td {
+  height: 32px;
+  padding: 0 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: var(--bg-surface);
+}
+.rg-table tbody tr:nth-child(even) td {
+  background: var(--rg-stripe-bg);
+}
+.rg-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-hover));
+}
+.rg-table tbody tr.selected td {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-surface));
+}
+.rg-table .rg-rownum {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  border-right: 1px solid var(--border);
+}
+.rg-table thead .rg-rownum {
+  z-index: 3;
+  cursor: default;
+}
+.rg-table.wrap td {
+  white-space: pre-wrap;
+  word-break: break-word;
+  height: auto;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  vertical-align: top;
+}
+.rg-th-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rg-table th.rg-h-num .rg-kind {
+  text-align: right;
+}
+.rg-sort {
+  margin-left: 4px;
+  color: var(--accent);
+  font-size: 10px;
+}
+.rg-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.rg-overlay strong {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+.rg-overlay-inline {
+  padding: var(--sp-6) var(--sp-4);
+}
+
+/* Footer: count · tools · pager */
+.rg-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  min-height: 42px;
+  padding: 5px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+.rg-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+.rg-count strong {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.rg-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.rg-chip.warn {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+}
+.rg-tools {
+  display: flex;
+  gap: 4px;
+}
+.rg-tool {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.rg-tool.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.rg-pager {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.rg-pagesize {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 10px;
+  white-space: nowrap;
+}
+.rg-pagesize .input {
+  width: auto;
+  height: 28px;
+  padding: 2px 6px;
+  font-size: 12.5px;
+}
+.rg-range,
+.rg-page {
+  padding: 0 6px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.rg-nav {
+  min-width: 30px;
+  padding: 2px 6px;
+  font-size: 16px;
+  line-height: 1;
+}
+@media (max-width: 760px) {
+  .rg-footer {
+    gap: 6px 10px;
+  }
+  .rg-pager {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .rg-pagesize {
+    margin-right: auto;
+  }
+  .rg-page {
+    display: none; /* the range already says where you are */
+  }
+}
+
+/* Editor execution status bar */
+.rs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.rs-chip.ok {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+}
+.rs-chip.err {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+}
+.rs-chip.warn {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+}
+.rs-chip.run {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.rs-metrics {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.rs-metric + .rs-metric::before {
+  content: "·";
+  margin: 0 8px;
+  color: var(--text-muted);
+}
+.rs-msg {
+  flex: 1;
+  min-width: 0;
+  color: var(--danger);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rs-time {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* Results-pane states: running, empty (no result set), error */
+.results-state {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 680px;
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.results-state h4 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.results-state .rs-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+.results-state.ok .rs-icon {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+.results-state.error .rs-icon {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.results-state pre {
+  margin: 0;
+  max-width: 100%;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font: 12.5px/1.5 var(--font-mono);
+  text-align: left;
+  white-space: pre-wrap;
+}
+
 /* Editor layout */
 .editor-layout,
 .schema-layout,
